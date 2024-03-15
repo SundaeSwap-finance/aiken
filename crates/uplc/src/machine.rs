@@ -70,22 +70,37 @@ impl Machine {
 
     pub fn run(&mut self, term: Term<NamedDeBruijn>) -> Result<Term<NamedDeBruijn>, Error> {
         use MachineState::*;
+        let mut state = self.get_initial_machine_state(term)?;
+        loop {
+            state = self.step(state)?;
+            match state {
+                Compute(_, _, _) => (),
+                Return(_, _) => (),
+                Done(t) => {
+                    return Ok(t);
+                }
+            }
+        }
+    }
 
+    fn step(&mut self, state: MachineState) -> Result<MachineState, Error> {
+        use MachineState::*;
+        let state = match state {
+            Compute(context, env, t) => self.compute(context, env, t)?,
+            Return(context, value) => self.return_compute(context, value)?,
+            Done(t) => {
+                return Ok(Done(t));
+            }
+        };
+        return Ok(state);
+    }
+
+    fn get_initial_machine_state(&mut self, term: Term<NamedDeBruijn>) -> Result<MachineState, Error> {
         let startup_budget = self.costs.machine_costs.get(StepKind::StartUp);
 
         self.spend_budget(startup_budget)?;
 
-        let mut state = Compute(Context::NoFrame, Rc::new(vec![]), term);
-
-        loop {
-            state = match state {
-                Compute(context, env, t) => self.compute(context, env, t)?,
-                Return(context, value) => self.return_compute(context, value)?,
-                Done(t) => {
-                    return Ok(t);
-                }
-            };
-        }
+        return Ok(MachineState::Compute(Context::NoFrame, Rc::new(vec![]), term));
     }
 
     fn compute(
