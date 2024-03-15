@@ -73,12 +73,8 @@ impl Machine {
         let mut state = self.get_initial_machine_state(term)?;
         loop {
             state = self.step(state)?;
-            match state {
-                Compute(_, _, _) => (),
-                Return(_, _) => (),
-                Done(t) => {
-                    return Ok(t);
-                }
+            if let Done(t) = state {
+                return Ok(t);
             }
         }
     }
