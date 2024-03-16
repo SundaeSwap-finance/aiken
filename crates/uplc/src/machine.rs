@@ -79,7 +79,7 @@ impl Machine {
         }
     }
 
-    fn step(&mut self, state: MachineState) -> Result<MachineState, Error> {
+    pub fn step(&mut self, state: MachineState) -> Result<MachineState, Error> {
         use MachineState::*;
         let state = match state {
             Compute(context, env, t) => self.compute(context, env, t)?,
@@ -91,7 +91,7 @@ impl Machine {
         return Ok(state);
     }
 
-    fn get_initial_machine_state(&mut self, term: Term<NamedDeBruijn>) -> Result<MachineState, Error> {
+    pub fn get_initial_machine_state(&mut self, term: Term<NamedDeBruijn>) -> Result<MachineState, Error> {
         let startup_budget = self.costs.machine_costs.get(StepKind::StartUp);
 
         self.spend_budget(startup_budget)?;
