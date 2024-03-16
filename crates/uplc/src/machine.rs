@@ -26,7 +26,7 @@ pub enum MachineState {
 }
 
 #[derive(Clone)]
-enum Context {
+pub enum Context {
     FrameAwaitArg(Value, Box<Context>),
     FrameAwaitFunTerm(Env, Term<NamedDeBruijn>, Box<Context>),
     FrameAwaitFunValue(Value, Box<Context>),
