@@ -19,7 +19,7 @@ use self::{
     value::{Env, Value},
 };
 
-enum MachineState {
+pub enum MachineState {
     Return(Context, Value),
     Compute(Context, Env, Term<NamedDeBruijn>),
     Done(Term<NamedDeBruijn>),
