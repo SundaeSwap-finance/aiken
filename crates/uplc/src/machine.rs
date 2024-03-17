@@ -19,13 +19,14 @@ use self::{
     value::{Env, Value},
 };
 
+#[derive(Clone)]
 pub enum MachineState {
     Return(Context, Value),
     Compute(Context, Env, Term<NamedDeBruijn>),
     Done(Term<NamedDeBruijn>),
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum Context {
     FrameAwaitArg(Value, Box<Context>),
     FrameAwaitFunTerm(Env, Term<NamedDeBruijn>, Box<Context>),
