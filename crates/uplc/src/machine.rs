@@ -92,12 +92,19 @@ impl Machine {
         return Ok(state);
     }
 
-    pub fn get_initial_machine_state(&mut self, term: Term<NamedDeBruijn>) -> Result<MachineState, Error> {
+    pub fn get_initial_machine_state(
+        &mut self,
+        term: Term<NamedDeBruijn>,
+    ) -> Result<MachineState, Error> {
         let startup_budget = self.costs.machine_costs.get(StepKind::StartUp);
 
         self.spend_budget(startup_budget)?;
 
-        return Ok(MachineState::Compute(Context::NoFrame, Rc::new(vec![]), term));
+        return Ok(MachineState::Compute(
+            Context::NoFrame,
+            Rc::new(vec![]),
+            term,
+        ));
     }
 
     fn compute(
