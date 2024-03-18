@@ -3,7 +3,7 @@ use std::rc::Rc;
 use crate::ast::{Constant, NamedDeBruijn, Term, Type};
 
 pub mod cost_model;
-mod discharge;
+pub mod discharge;
 mod error;
 pub mod eval_result;
 pub mod runtime;

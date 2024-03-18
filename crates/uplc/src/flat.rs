@@ -821,7 +821,7 @@ impl<'b> Binder<'b> for NamedDeBruijn {
     }
 
     fn text(&self) -> String {
-        format!("{}_{}", &self.text, self.index)
+        format!("{}", &self.text) // Temporary hack, until we have a solution to pretty print just the names
     }
 }
 
