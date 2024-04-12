@@ -3,7 +3,7 @@ use std::rc::Rc;
 use crate::ast::{Constant, NamedDeBruijn, Term, Type};
 
 pub mod cost_model;
-mod discharge;
+pub mod discharge;
 mod error;
 pub mod eval_result;
 pub mod runtime;
@@ -19,14 +19,15 @@ use self::{
     value::{Env, Value},
 };
 
-enum MachineState {
+#[derive(Clone)]
+pub enum MachineState {
     Return(Context, Value),
     Compute(Context, Env, Term<NamedDeBruijn>),
     Done(Term<NamedDeBruijn>),
 }
 
-#[derive(Clone)]
-enum Context {
+#[derive(Clone, Debug)]
+pub enum Context {
     FrameAwaitArg(Value, Box<Context>),
     FrameAwaitFunTerm(Env, Term<NamedDeBruijn>, Box<Context>),
     FrameAwaitFunValue(Value, Box<Context>),
@@ -70,22 +71,40 @@ impl Machine {
 
     pub fn run(&mut self, term: Term<NamedDeBruijn>) -> Result<Term<NamedDeBruijn>, Error> {
         use MachineState::*;
+        let mut state = self.get_initial_machine_state(term)?;
+        loop {
+            state = self.step(state)?;
+            if let Done(t) = state {
+                return Ok(t);
+            }
+        }
+    }
 
+    pub fn step(&mut self, state: MachineState) -> Result<MachineState, Error> {
+        use MachineState::*;
+        let state = match state {
+            Compute(context, env, t) => self.compute(context, env, t)?,
+            Return(context, value) => self.return_compute(context, value)?,
+            Done(t) => {
+                return Ok(Done(t));
+            }
+        };
+        return Ok(state);
+    }
+
+    pub fn get_initial_machine_state(
+        &mut self,
+        term: Term<NamedDeBruijn>,
+    ) -> Result<MachineState, Error> {
         let startup_budget = self.costs.machine_costs.get(StepKind::StartUp);
 
         self.spend_budget(startup_budget)?;
 
-        let mut state = Compute(Context::NoFrame, Rc::new(vec![]), term);
-
-        loop {
-            state = match state {
-                Compute(context, env, t) => self.compute(context, env, t)?,
-                Return(context, value) => self.return_compute(context, value)?,
-                Done(t) => {
-                    return Ok(t);
-                }
-            };
-        }
+        return Ok(MachineState::Compute(
+            Context::NoFrame,
+            Rc::new(vec![]),
+            term,
+        ));
     }
 
     fn compute(

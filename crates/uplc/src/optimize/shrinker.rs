@@ -790,7 +790,7 @@ impl Term<Name> {
 }
 
 impl Program<Name> {
-    fn traverse_uplc_with(
+    pub fn traverse_uplc_with(
         self,
         with: &mut impl FnMut(Option<usize>, &mut Term<Name>, Vec<(usize, Term<Name>)>, &Scope),
     ) -> Self {

@@ -2,7 +2,7 @@ use crate::ast::{NamedDeBruijn, Term};
 
 use super::value::{Env, Value};
 
-pub(super) fn value_as_term(value: Value) -> Term<NamedDeBruijn> {
+pub fn value_as_term(value: Value) -> Term<NamedDeBruijn> {
     match value {
         Value::Con(x) => Term::Constant(x),
         Value::Builtin { runtime, fun } => {
