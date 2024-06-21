@@ -12,6 +12,18 @@ fn format_comment_at_end_of_file() {
 }
 
 #[test]
+fn format_single_hex_digit() {
+    assert_format!(
+        r#"
+        const a = 0xa
+        const b = 0x0f
+        const c = 0x0000000f
+        const d = 0x123
+    "#
+    );
+}
+
+#[test]
 fn format_simple_module() {
     assert_format!(
         r#"
@@ -297,8 +309,6 @@ fn format_else_if() {
 
 #[test]
 fn format_imports() {
-    // TODO: Fix this case, this is behaving weirdly, not keeping the order for the comments and
-    // imports.
     assert_format!(
         r#"
         use aiken/list
@@ -308,6 +318,59 @@ fn format_imports() {
         // bar
         use aiken/transaction
         use aiken/transaction/value
+    "#
+    );
+}
+
+#[test]
+fn format_merge_imports() {
+    assert_format!(
+        r#"
+        use aiken/list.{bar, foo}
+        use aiken/list.{baz}
+    "#
+    );
+}
+
+#[test]
+fn format_merge_imports_2() {
+    assert_format!(
+        r#"
+        use aiken/list.{bar, foo}
+        use aiken/dict
+        use aiken/list
+    "#
+    );
+}
+
+#[test]
+fn format_merge_imports_alias() {
+    assert_format!(
+        r#"
+        use aiken/list.{bar, foo}
+        use aiken/list.{baz} as vector
+    "#
+    );
+}
+
+#[test]
+fn format_merge_imports_alias_2() {
+    assert_format!(
+        r#"
+        use aiken/list.{bar, foo} as vector
+        use aiken/list.{baz} as vector
+    "#
+    );
+}
+
+#[test]
+fn format_merge_imports_comments() {
+    assert_format!(
+        r#"
+        // foo
+        use aiken/list.{bar, foo}
+        // bar
+        use aiken/list.{baz}
     "#
     );
 }
@@ -750,6 +813,24 @@ fn format_int_uint() {
 }
 
 #[test]
+fn preserve_comment_in_record() {
+    assert_format!(
+        r#"
+        fn foo() {
+          let Output {
+            // something
+            address: own_address,
+            // value: own_value,
+            ..
+          } = own_output
+
+          own_address
+        }
+        "#
+    );
+}
+
+#[test]
 fn fail_expr() {
     assert_format!(
         r#"
@@ -788,6 +869,81 @@ fn superfluous_parens_in_binop() {
         r#"
         pub fn bar() {
           a && ( b && c )
+        }
+        "#
+    );
+}
+
+#[test]
+fn format_pairs() {
+    assert_format!(
+        r#"
+        pub fn foo(x: Pair<Int, Int>) {
+            Pair(x.1st, x.2nd)
+        }"#
+    );
+}
+
+#[test]
+fn format_fn_pattern() {
+    assert_format!(
+        r#"
+        pub fn foo(Foo { a, b, .. }) {
+            todo
+        }
+
+        pub fn bar([Bar] : List<Bar>) {
+            todo
+        }
+
+        pub fn baz((Baz, Baz) as x) {
+            todo
+        }
+
+        pub fn fiz(Pair(fst, snd) as x: Pair<Int, Int>) {
+            todo
+        }
+
+        test buz((a, b) via some_fuzzer()) {
+            todo
+        }
+        "#
+    );
+}
+
+#[test]
+fn format_anon_fn_pattern() {
+    assert_format!(
+        r#"
+        pub fn main() {
+            let foo = fn (Foo { a, b, .. }) { todo }
+            let bar = fn ([Bar] : List<Bar>) { todo }
+            let baz = fn ((Baz, Baz) as x) { todo }
+            let fiz = fn (Pair(fst, snd) as x: Pair<Int, Int>) { todo }
+            todo
+        }
+        "#
+    );
+}
+
+#[test]
+fn format_validator_pattern() {
+    assert_format!(
+        r#"
+        validator(Foo { a, b, .. }) {
+            fn foo() { todo }
+        }
+
+        validator([Bar] : List<Bar>) {
+            fn bar() { todo }
+        }
+
+        validator((Baz, Baz) as x) {
+            fn baz() { todo }
+        }
+
+        validator((fst, snd) as x: Pair<Int, Int>) {
+            fn fiz() { todo }
         }
         "#
     );

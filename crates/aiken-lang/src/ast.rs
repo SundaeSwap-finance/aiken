@@ -7,6 +7,7 @@ use crate::{
 };
 use indexmap::IndexMap;
 use miette::Diagnostic;
+use ordinal::Ordinal;
 use owo_colors::{OwoColorize, Stream::Stdout};
 use std::{
     fmt::{self, Display},
@@ -14,7 +15,7 @@ use std::{
     rc::Rc,
 };
 use uplc::machine::runtime::Compressable;
-use vec1::Vec1;
+use vec1::{vec1, Vec1};
 
 pub const BACKPASS_VARIABLE: &str = "_backpass";
 pub const CAPTURE_VARIABLE: &str = "_capture";
@@ -224,6 +225,13 @@ pub type TypedTest = Function<Rc<Type>, TypedExpr, TypedArgVia>;
 pub type UntypedTest = Function<(), UntypedExpr, UntypedArgVia>;
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum OnTestFailure {
+    FailImmediately,
+    SucceedImmediately,
+    SucceedEventually,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Function<T, Expr, Arg> {
     pub arguments: Vec<Arg>,
     pub body: Expr,
@@ -234,7 +242,7 @@ pub struct Function<T, Expr, Arg> {
     pub return_annotation: Option<Annotation>,
     pub return_type: T,
     pub end_position: usize,
-    pub can_error: bool,
+    pub on_test_failure: OnTestFailure,
 }
 
 impl TypedFunction {
@@ -279,7 +287,7 @@ impl From<UntypedTest> for UntypedFunction {
             return_annotation: f.return_annotation,
             return_type: f.return_type,
             body: f.body,
-            can_error: f.can_error,
+            on_test_failure: f.on_test_failure,
             end_position: f.end_position,
         }
     }
@@ -296,7 +304,7 @@ impl From<TypedTest> for TypedFunction {
             return_annotation: f.return_annotation,
             return_type: f.return_type,
             body: f.body,
-            can_error: f.can_error,
+            on_test_failure: f.on_test_failure,
             end_position: f.end_position,
         }
     }
@@ -510,17 +518,17 @@ pub struct ModuleConstant<T> {
     pub tipo: T,
 }
 
-pub type TypedValidator = Validator<Rc<Type>, TypedExpr>;
-pub type UntypedValidator = Validator<(), UntypedExpr>;
+pub type TypedValidator = Validator<Rc<Type>, TypedArg, TypedExpr>;
+pub type UntypedValidator = Validator<(), UntypedArg, UntypedExpr>;
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct Validator<T, Expr> {
+pub struct Validator<T, Arg, Expr> {
     pub doc: Option<String>,
     pub end_position: usize,
-    pub fun: Function<T, Expr, Arg<T>>,
-    pub other_fun: Option<Function<T, Expr, Arg<T>>>,
+    pub fun: Function<T, Expr, Arg>,
+    pub other_fun: Option<Function<T, Expr, Arg>>,
     pub location: Span,
-    pub params: Vec<Arg<T>>,
+    pub params: Vec<Arg>,
 }
 
 impl TypedValidator {
@@ -568,12 +576,12 @@ impl TypedValidator {
     }
 }
 
-pub type TypedDefinition = Definition<Rc<Type>, TypedExpr, String>;
-pub type UntypedDefinition = Definition<(), UntypedExpr, ()>;
+pub type TypedDefinition = Definition<Rc<Type>, TypedArg, TypedExpr, String>;
+pub type UntypedDefinition = Definition<(), UntypedArg, UntypedExpr, ()>;
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub enum Definition<T, Expr, PackageName> {
-    Fn(Function<T, Expr, Arg<T>>),
+pub enum Definition<T, Arg, Expr, PackageName> {
+    Fn(Function<T, Expr, Arg>),
 
     TypeAlias(TypeAlias<T>),
 
@@ -583,12 +591,12 @@ pub enum Definition<T, Expr, PackageName> {
 
     ModuleConstant(ModuleConstant<T>),
 
-    Test(Function<T, Expr, ArgVia<T, Expr>>),
+    Test(Function<T, Expr, ArgVia<Arg, Expr>>),
 
-    Validator(Validator<T, Expr>),
+    Validator(Validator<T, Arg, Expr>),
 }
 
-impl<A, B, C> Definition<A, B, C> {
+impl<A, B, C, D> Definition<A, B, C, D> {
     pub fn location(&self) -> Span {
         match self {
             Definition::Fn(Function { location, .. })
@@ -783,27 +791,90 @@ impl<T: PartialEq> RecordConstructorArg<T> {
     }
 }
 
-pub type TypedArg = Arg<Rc<Type>>;
-pub type UntypedArg = Arg<()>;
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum ArgBy {
+    ByName(ArgName),
+    ByPattern(UntypedPattern),
+}
+
+impl ArgBy {
+    pub fn into_extra_assignment(
+        self,
+        name: &ArgName,
+        annotation: Option<&Annotation>,
+        location: Span,
+    ) -> Option<UntypedExpr> {
+        match self {
+            ArgBy::ByName(..) => None,
+            ArgBy::ByPattern(pattern) => Some(UntypedExpr::Assignment {
+                location,
+                value: Box::new(UntypedExpr::Var {
+                    location,
+                    name: name.get_name(),
+                }),
+                patterns: vec1![AssignmentPattern {
+                    pattern,
+                    location,
+                    annotation: annotation.cloned(),
+                }],
+                kind: AssignmentKind::Let { backpassing: false },
+            }),
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct Arg<T> {
+pub struct UntypedArg {
+    pub by: ArgBy,
+    pub location: Span,
+    pub annotation: Option<Annotation>,
+    pub doc: Option<String>,
+    pub is_validator_param: bool,
+}
+
+impl UntypedArg {
+    pub fn arg_name(&self, ix: usize) -> ArgName {
+        match self.by {
+            ArgBy::ByName(ref name) => name.clone(),
+            ArgBy::ByPattern(..) => {
+                // NOTE: We use ordinal here not only because it's cute, but because
+                // such a name cannot be parsed to begin with and thus, will not clash
+                // with any user-defined name.
+                let name = format!("{}_arg", Ordinal::<usize>(ix).suffix());
+                ArgName::Named {
+                    label: name.clone(),
+                    name,
+                    location: self.location,
+                }
+            }
+        }
+    }
+
+    pub fn set_type(self, tipo: Rc<Type>, ix: usize) -> TypedArg {
+        TypedArg {
+            tipo,
+            arg_name: self.arg_name(ix),
+            location: self.location,
+            annotation: self.annotation,
+            is_validator_param: self.is_validator_param,
+            doc: self.doc,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct TypedArg {
     pub arg_name: ArgName,
     pub location: Span,
     pub annotation: Option<Annotation>,
     pub doc: Option<String>,
-    pub tipo: T,
+    pub is_validator_param: bool,
+    pub tipo: Rc<Type>,
 }
 
-impl<A> Arg<A> {
-    pub fn set_type<B>(self, tipo: B) -> Arg<B> {
-        Arg {
-            tipo,
-            arg_name: self.arg_name,
-            location: self.location,
-            annotation: self.annotation,
-            doc: self.doc,
-        }
+impl TypedArg {
+    pub fn put_doc(&mut self, new_doc: String) {
+        self.doc = Some(new_doc);
     }
 
     pub fn get_variable_name(&self) -> Option<&str> {
@@ -823,12 +894,6 @@ impl<A> Arg<A> {
         false
     }
 
-    pub fn put_doc(&mut self, new_doc: String) {
-        self.doc = Some(new_doc);
-    }
-}
-
-impl TypedArg {
     pub fn find_node(&self, byte_index: usize) -> Option<Located<'_>> {
         if self.arg_name.location().contains(byte_index) {
             Some(Located::Argument(&self.arg_name, self.tipo.clone()))
@@ -840,40 +905,38 @@ impl TypedArg {
     }
 }
 
-pub type TypedArgVia = ArgVia<Rc<Type>, TypedExpr>;
-pub type UntypedArgVia = ArgVia<(), UntypedExpr>;
+pub type TypedArgVia = ArgVia<TypedArg, TypedExpr>;
+pub type UntypedArgVia = ArgVia<UntypedArg, UntypedExpr>;
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct ArgVia<T, Expr> {
-    pub arg_name: ArgName,
-    pub location: Span,
+pub struct ArgVia<Arg, Expr> {
+    pub arg: Arg,
     pub via: Expr,
-    pub tipo: T,
-    pub annotation: Option<Annotation>,
 }
 
-impl<T, Ann> From<ArgVia<T, Ann>> for Arg<T> {
-    fn from(arg: ArgVia<T, Ann>) -> Arg<T> {
-        Arg {
-            arg_name: arg.arg_name,
-            location: arg.location,
-            tipo: arg.tipo,
-            annotation: None,
-            doc: None,
-        }
+impl<Expr> From<ArgVia<TypedArg, Expr>> for TypedArg {
+    fn from(this: ArgVia<TypedArg, Expr>) -> TypedArg {
+        this.arg
+    }
+}
+
+impl<Expr> From<ArgVia<UntypedArg, Expr>> for UntypedArg {
+    fn from(this: ArgVia<UntypedArg, Expr>) -> UntypedArg {
+        this.arg
     }
 }
 
 impl TypedArgVia {
     pub fn find_node(&self, byte_index: usize) -> Option<Located<'_>> {
-        if self.arg_name.location().contains(byte_index) {
-            Some(Located::Argument(&self.arg_name, self.tipo.clone()))
+        if self.arg.arg_name.location().contains(byte_index) {
+            Some(Located::Argument(&self.arg.arg_name, self.arg.tipo.clone()))
         } else {
             // `via` is done first here because when there is no manually written
             // annotation, it seems one is injected leading to a `found` returning too early
             // because the span of the filled in annotation matches the span of the via expr.
             self.via.find_node(byte_index).or_else(|| {
-                self.annotation
+                self.arg
+                    .annotation
                     .as_ref()
                     .and_then(|annotation| annotation.find_node(byte_index))
             })
@@ -892,7 +955,6 @@ pub enum ArgName {
         name: String,
         label: String,
         location: Span,
-        is_validator_param: bool,
     },
 }
 
@@ -969,6 +1031,12 @@ pub enum Annotation {
         location: Span,
         elems: Vec<Self>,
     },
+
+    Pair {
+        location: Span,
+        fst: Box<Self>,
+        snd: Box<Self>,
+    },
 }
 
 impl Annotation {
@@ -978,7 +1046,8 @@ impl Annotation {
             | Annotation::Tuple { location, .. }
             | Annotation::Var { location, .. }
             | Annotation::Hole { location, .. }
-            | Annotation::Constructor { location, .. } => *location,
+            | Annotation::Constructor { location, .. }
+            | Annotation::Pair { location, .. } => *location,
         }
     }
 
@@ -1080,6 +1149,18 @@ impl Annotation {
                 } => name == o_name,
                 _ => false,
             },
+            Annotation::Pair { fst, snd, .. } => {
+                if let Annotation::Pair {
+                    fst: o_fst,
+                    snd: o_snd,
+                    ..
+                } = other
+                {
+                    fst.is_logically_equal(o_fst) && snd.is_logically_equal(o_snd)
+                } else {
+                    false
+                }
+            }
         }
     }
 
@@ -1100,6 +1181,9 @@ impl Annotation {
                 elems.iter().find_map(|arg| arg.find_node(byte_index))
             }
             Annotation::Var { .. } | Annotation::Hole { .. } => None,
+            Annotation::Pair { fst, snd, .. } => fst
+                .find_node(byte_index)
+                .or_else(|| snd.find_node(byte_index)),
         };
 
         located.or(Some(Located::Annotation(self)))
@@ -1220,8 +1304,14 @@ pub enum Pattern<Constructor, Type> {
         arguments: Vec<CallArg<Self>>,
         module: Option<String>,
         constructor: Constructor,
-        with_spread: bool,
+        spread_location: Option<Span>,
         tipo: Type,
+    },
+
+    Pair {
+        location: Span,
+        fst: Box<Self>,
+        snd: Box<Self>,
     },
 
     Tuple {
@@ -1239,7 +1329,17 @@ impl<A, B> Pattern<A, B> {
             | Pattern::List { location, .. }
             | Pattern::Discard { location, .. }
             | Pattern::Tuple { location, .. }
+            | Pattern::Pair { location, .. }
             | Pattern::Constructor { location, .. } => *location,
+        }
+    }
+
+    pub fn with_spread(&self) -> bool {
+        match self {
+            Pattern::Constructor {
+                spread_location, ..
+            } => spread_location.is_some(),
+            _ => false,
         }
     }
 
@@ -1265,7 +1365,7 @@ impl UntypedPattern {
             name: "True".to_string(),
             arguments: vec![],
             constructor: (),
-            with_spread: false,
+            spread_location: None,
             tipo: (),
             module: None,
             is_record: false,
@@ -1308,6 +1408,19 @@ impl TypedPattern {
                 _ => None,
             },
 
+            Pattern::Pair { fst, snd, .. } => match &**value {
+                Type::Pair {
+                    fst: fst_v,
+                    snd: snd_v,
+                    ..
+                } => [fst, snd]
+                    .into_iter()
+                    .zip([fst_v, snd_v].iter())
+                    .find_map(|(e, t)| e.find_node(byte_index, t))
+                    .or(Some(Located::Pattern(self, value.clone()))),
+                _ => None,
+            },
+
             Pattern::Constructor {
                 arguments, tipo, ..
             } => match &**tipo {
@@ -1321,6 +1434,7 @@ impl TypedPattern {
         }
     }
 
+    // TODO: This function definition is weird, see where this is used and how.
     pub fn tipo(&self, value: &TypedExpr) -> Option<Rc<Type>> {
         match self {
             Pattern::Int { .. } => Some(builtins::int()),
@@ -1328,7 +1442,7 @@ impl TypedPattern {
             Pattern::Var { .. } | Pattern::Assign { .. } | Pattern::Discard { .. } => {
                 Some(value.tipo())
             }
-            Pattern::List { .. } | Pattern::Tuple { .. } => None,
+            Pattern::List { .. } | Pattern::Tuple { .. } | Pattern::Pair { .. } => None,
         }
     }
 }

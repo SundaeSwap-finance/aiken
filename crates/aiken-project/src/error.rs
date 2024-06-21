@@ -1,4 +1,4 @@
-use crate::{blueprint::error as blueprint, deps::manifest::Package, package_name::PackageName};
+use crate::{blueprint, deps::manifest::Package, package_name::PackageName};
 use aiken_lang::{
     ast::{self, Span},
     error::ExtraData,
@@ -6,9 +6,13 @@ use aiken_lang::{
     tipo,
 };
 use miette::{
-    Diagnostic, EyreContext, LabeledSpan, MietteHandlerOpts, NamedSource, RgbColors, SourceCode,
+    Diagnostic, EyreContext, LabeledSpan, MietteHandler, MietteHandlerOpts, NamedSource, RgbColors,
+    SourceCode,
 };
-use owo_colors::{OwoColorize, Stream::Stdout};
+use owo_colors::{
+    OwoColorize,
+    Stream::{Stderr, Stdout},
+};
 use std::{
     fmt::{Debug, Display},
     io,
@@ -120,6 +124,9 @@ pub enum Error {
 
     #[error("I found multiple suitable validators and I need you to tell me which one to pick.")]
     MoreThanOneValidatorFound { known_validators: Vec<String> },
+
+    #[error("I couldn't find any exportable function named '{name}' in module '{module}'.")]
+    ExportNotFound { module: String, name: String },
 }
 
 impl Error {
@@ -151,20 +158,11 @@ impl Error {
 
 impl Debug for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let miette_handler = MietteHandlerOpts::new()
-            // For better support of terminal themes use the ANSI coloring
-            .rgb_colors(RgbColors::Never)
-            // If ansi support is disabled in the config disable the eye-candy
-            .color(true)
-            .unicode(true)
-            .terminal_links(true)
-            .build();
-
-        // Ignore error to prevent format! panics. This can happen if span points at some
-        // inaccessible location, for example by calling `report_error()` with wrong working set.
-        let _ = miette_handler.debug(self, f);
-
-        Ok(())
+        default_miette_handler(2)
+            .debug(self, f)
+            // Ignore error to prevent format! panics. This can happen if span points at some
+            // inaccessible location, for example by calling `report_error()` with wrong working set.
+            .or(Ok(()))
     }
 }
 
@@ -177,27 +175,28 @@ impl From<Error> for Vec<Error> {
 impl ExtraData for Error {
     fn extra_data(&self) -> Option<String> {
         match self {
-            Error::DuplicateModule { .. } => None,
-            Error::FileIo { .. } => None,
-            Error::Format { .. } => None,
-            Error::StandardIo { .. } => None,
-            Error::Blueprint { .. } => None,
-            Error::MissingManifest { .. } => None,
-            Error::TomlLoading { .. } => None,
-            Error::ImportCycle { .. } => None,
-            Error::Parse { .. } => None,
+            Error::DuplicateModule { .. }
+            | Error::FileIo { .. }
+            | Error::Format { .. }
+            | Error::StandardIo { .. }
+            | Error::Blueprint { .. }
+            | Error::MissingManifest { .. }
+            | Error::TomlLoading { .. }
+            | Error::ImportCycle { .. }
+            | Error::Parse { .. }
+            | Error::TestFailure { .. }
+            | Error::Http { .. }
+            | Error::ZipExtract { .. }
+            | Error::JoinError { .. }
+            | Error::UnknownPackageVersion { .. }
+            | Error::UnableToResolvePackage { .. }
+            | Error::Json { .. }
+            | Error::MalformedStakeAddress { .. }
+            | Error::NoValidatorNotFound { .. }
+            | Error::MoreThanOneValidatorFound { .. }
+            | Error::Module { .. }
+            | Error::ExportNotFound { .. } => None,
             Error::Type { error, .. } => error.extra_data(),
-            Error::TestFailure { .. } => None,
-            Error::Http { .. } => None,
-            Error::ZipExtract { .. } => None,
-            Error::JoinError { .. } => None,
-            Error::UnknownPackageVersion { .. } => None,
-            Error::UnableToResolvePackage { .. } => None,
-            Error::Json { .. } => None,
-            Error::MalformedStakeAddress { .. } => None,
-            Error::NoValidatorNotFound { .. } => None,
-            Error::MoreThanOneValidatorFound { .. } => None,
-            Error::Module { .. } => None,
         }
     }
 }
@@ -210,53 +209,55 @@ pub trait GetSource {
 impl GetSource for Error {
     fn path(&self) -> Option<PathBuf> {
         match self {
-            Error::DuplicateModule { second, .. } => Some(second.to_path_buf()),
-            Error::FileIo { .. } => None,
-            Error::Format { .. } => None,
-            Error::StandardIo(_) => None,
-            Error::Blueprint(_) => None,
-            Error::MissingManifest { path } => Some(path.to_path_buf()),
-            Error::TomlLoading { path, .. } => Some(path.to_path_buf()),
-            Error::ImportCycle { .. } => None,
-            Error::Parse { path, .. } => Some(path.to_path_buf()),
-            Error::Type { path, .. } => Some(path.to_path_buf()),
-            Error::TestFailure { path, .. } => Some(path.to_path_buf()),
-            Error::Http(_) => None,
-            Error::ZipExtract(_) => None,
-            Error::JoinError(_) => None,
-            Error::UnknownPackageVersion { .. } => None,
-            Error::UnableToResolvePackage { .. } => None,
-            Error::Json { .. } => None,
-            Error::MalformedStakeAddress { .. } => None,
-            Error::NoValidatorNotFound { .. } => None,
-            Error::MoreThanOneValidatorFound { .. } => None,
-            Error::Module { .. } => None,
+            Error::FileIo { .. }
+            | Error::Format { .. }
+            | Error::StandardIo(_)
+            | Error::Blueprint(_)
+            | Error::ImportCycle { .. }
+            | Error::Http(_)
+            | Error::ZipExtract(_)
+            | Error::JoinError(_)
+            | Error::UnknownPackageVersion { .. }
+            | Error::UnableToResolvePackage { .. }
+            | Error::Json { .. }
+            | Error::MalformedStakeAddress { .. }
+            | Error::NoValidatorNotFound { .. }
+            | Error::MoreThanOneValidatorFound { .. }
+            | Error::ExportNotFound { .. }
+            | Error::Module { .. } => None,
+            Error::DuplicateModule { second: path, .. }
+            | Error::MissingManifest { path }
+            | Error::TomlLoading { path, .. }
+            | Error::Parse { path, .. }
+            | Error::Type { path, .. }
+            | Error::TestFailure { path, .. } => Some(path.to_path_buf()),
         }
     }
 
     fn src(&self) -> Option<String> {
         match self {
-            Error::DuplicateModule { .. } => None,
-            Error::FileIo { .. } => None,
-            Error::Format { .. } => None,
-            Error::StandardIo(_) => None,
-            Error::Blueprint(_) => None,
-            Error::MissingManifest { .. } => None,
-            Error::TomlLoading { src, .. } => Some(src.to_string()),
-            Error::ImportCycle { .. } => None,
-            Error::Parse { src, .. } => Some(src.to_string()),
-            Error::Type { src, .. } => Some(src.to_string()),
-            Error::TestFailure { .. } => None,
-            Error::Http(_) => None,
-            Error::ZipExtract(_) => None,
-            Error::JoinError(_) => None,
-            Error::UnknownPackageVersion { .. } => None,
-            Error::UnableToResolvePackage { .. } => None,
-            Error::Json { .. } => None,
-            Error::MalformedStakeAddress { .. } => None,
-            Error::NoValidatorNotFound { .. } => None,
-            Error::MoreThanOneValidatorFound { .. } => None,
-            Error::Module { .. } => None,
+            Error::DuplicateModule { .. }
+            | Error::FileIo { .. }
+            | Error::Format { .. }
+            | Error::StandardIo(_)
+            | Error::Blueprint(_)
+            | Error::MissingManifest { .. }
+            | Error::ImportCycle { .. }
+            | Error::TestFailure { .. }
+            | Error::Http(_)
+            | Error::ZipExtract(_)
+            | Error::JoinError(_)
+            | Error::UnknownPackageVersion { .. }
+            | Error::UnableToResolvePackage { .. }
+            | Error::Json { .. }
+            | Error::MalformedStakeAddress { .. }
+            | Error::NoValidatorNotFound { .. }
+            | Error::MoreThanOneValidatorFound { .. }
+            | Error::ExportNotFound { .. }
+            | Error::Module { .. } => None,
+            Error::TomlLoading { src, .. } | Error::Parse { src, .. } | Error::Type { src, .. } => {
+                Some(src.to_string())
+            }
         }
     }
 }
@@ -305,6 +306,7 @@ impl Diagnostic for Error {
             Error::MalformedStakeAddress { .. } => None,
             Error::NoValidatorNotFound { .. } => None,
             Error::MoreThanOneValidatorFound { .. } => None,
+            Error::ExportNotFound { .. } => None,
             Error::Module(e) => e.code().map(boxed),
         }
     }
@@ -334,6 +336,7 @@ impl Diagnostic for Error {
             Error::Http(_) => None,
             Error::ZipExtract(_) => None,
             Error::JoinError(_) => None,
+            Error::ExportNotFound { .. } => None,
             Error::UnknownPackageVersion { .. } => Some(Box::new(
                 "Perhaps, double-check the package repository and version?",
             )),
@@ -379,6 +382,7 @@ impl Diagnostic for Error {
             Error::DuplicateModule { .. } => None,
             Error::FileIo { .. } => None,
             Error::ImportCycle { .. } => None,
+            Error::ExportNotFound { .. } => None,
             Error::Blueprint(e) => e.labels(),
             Error::Parse { error, .. } => error.labels(),
             Error::MissingManifest { .. } => None,
@@ -413,6 +417,7 @@ impl Diagnostic for Error {
             Error::DuplicateModule { .. } => None,
             Error::FileIo { .. } => None,
             Error::ImportCycle { .. } => None,
+            Error::ExportNotFound { .. } => None,
             Error::Blueprint(e) => e.source_code(),
             Error::Parse { named, .. } => Some(named),
             Error::Type { named, .. } => Some(named),
@@ -439,6 +444,7 @@ impl Diagnostic for Error {
             Error::DuplicateModule { .. } => None,
             Error::FileIo { .. } => None,
             Error::ImportCycle { .. } => None,
+            Error::ExportNotFound { .. } => None,
             Error::Blueprint(e) => e.url(),
             Error::Parse { .. } => None,
             Error::Type { error, .. } => error.url(),
@@ -464,6 +470,7 @@ impl Diagnostic for Error {
         match self {
             Error::DuplicateModule { .. } => None,
             Error::FileIo { .. } => None,
+            Error::ExportNotFound { .. } => None,
             Error::Blueprint(e) => e.related(),
             Error::ImportCycle { .. } => None,
             Error::Parse { .. } => None,
@@ -491,7 +498,7 @@ impl Diagnostic for Error {
 pub enum Warning {
     #[error("You do not have any validators to build!")]
     NoValidators,
-    #[error("While trying to make sense of your code...")]
+    #[error("{}", warning)]
     Type {
         path: PathBuf,
         src: String,
@@ -501,13 +508,19 @@ pub enum Warning {
     },
     #[error("{name} is already a dependency.")]
     DependencyAlreadyExists { name: PackageName },
+    #[error("Ignoring file with invalid module name at: {path:?}")]
+    InvalidModuleName { path: PathBuf },
+    #[error("aiken.toml demands compiler version {demanded}, but you are using {current}.")]
+    CompilerVersionMismatch { demanded: String, current: String },
 }
 
 impl ExtraData for Warning {
     fn extra_data(&self) -> Option<String> {
         match self {
-            Warning::NoValidators { .. } => None,
-            Warning::DependencyAlreadyExists { .. } => None,
+            Warning::NoValidators { .. }
+            | Warning::DependencyAlreadyExists { .. }
+            | Warning::InvalidModuleName { .. }
+            | Warning::CompilerVersionMismatch { .. } => None,
             Warning::Type { warning, .. } => warning.extra_data(),
         }
     }
@@ -516,17 +529,20 @@ impl ExtraData for Warning {
 impl GetSource for Warning {
     fn path(&self) -> Option<PathBuf> {
         match self {
-            Warning::NoValidators => None,
-            Warning::Type { path, .. } => Some(path.clone()),
-            Warning::DependencyAlreadyExists { .. } => None,
+            Warning::InvalidModuleName { path } | Warning::Type { path, .. } => Some(path.clone()),
+            Warning::NoValidators
+            | Warning::DependencyAlreadyExists { .. }
+            | Warning::CompilerVersionMismatch { .. } => None,
         }
     }
 
     fn src(&self) -> Option<String> {
         match self {
-            Warning::NoValidators => None,
             Warning::Type { src, .. } => Some(src.clone()),
-            Warning::DependencyAlreadyExists { .. } => None,
+            Warning::NoValidators
+            | Warning::InvalidModuleName { .. }
+            | Warning::DependencyAlreadyExists { .. }
+            | Warning::CompilerVersionMismatch { .. } => None,
         }
     }
 }
@@ -539,38 +555,36 @@ impl Diagnostic for Warning {
     fn source_code(&self) -> Option<&dyn SourceCode> {
         match self {
             Warning::Type { named, .. } => Some(named),
-            Warning::NoValidators => None,
-            Warning::DependencyAlreadyExists { .. } => None,
+            Warning::NoValidators
+            | Warning::InvalidModuleName { .. }
+            | Warning::DependencyAlreadyExists { .. }
+            | Warning::CompilerVersionMismatch { .. } => None,
         }
     }
 
     fn labels(&self) -> Option<Box<dyn Iterator<Item = LabeledSpan> + '_>> {
         match self {
             Warning::Type { warning, .. } => warning.labels(),
-            Warning::NoValidators => None,
-            Warning::DependencyAlreadyExists { .. } => None,
+            Warning::InvalidModuleName { .. }
+            | Warning::NoValidators
+            | Warning::DependencyAlreadyExists { .. }
+            | Warning::CompilerVersionMismatch { .. } => None,
         }
     }
 
     fn code<'a>(&'a self) -> Option<Box<dyn Display + 'a>> {
-        fn boxed<'a>(s: Box<dyn Display + 'a>) -> Box<dyn Display + 'a> {
-            Box::new(format!(
-                "      {} {}",
-                "Warning"
-                    .if_supports_color(Stdout, |s| s.yellow())
-                    .if_supports_color(Stdout, |s| s.bold()),
-                format!("{s}").if_supports_color(Stdout, |s| s.yellow())
-            ))
-        }
-
         match self {
-            Warning::Type { warning, .. } => Some(boxed(Box::new(format!(
+            Warning::Type { warning, .. } => Some(Box::new(format!(
                 "aiken::check{}",
                 warning.code().map(|s| format!("::{s}")).unwrap_or_default()
-            )))),
-            Warning::NoValidators => Some(boxed(Box::new("aiken::check"))),
+            ))),
+            Warning::NoValidators => Some(Box::new("aiken::check")),
+            Warning::InvalidModuleName { .. } => Some(Box::new("aiken::project::module_name")),
+            Warning::CompilerVersionMismatch { .. } => {
+                Some(Box::new("aiken::project::compiler_version_mismatch"))
+            }
             Warning::DependencyAlreadyExists { .. } => {
-                Some(boxed(Box::new("aiken::packages::already_exists")))
+                Some(Box::new("aiken::packages::already_exists"))
             }
         }
     }
@@ -579,6 +593,13 @@ impl Diagnostic for Warning {
         match self {
             Warning::Type { warning, .. } => warning.help(),
             Warning::NoValidators => None,
+            Warning::CompilerVersionMismatch { demanded, .. } => Some(Box::new(format!(
+                "You may want to switch to {}",
+                demanded.if_supports_color(Stdout, |s| s.purple())
+            ))),
+            Warning::InvalidModuleName { .. } => Some(Box::new(
+                "Module names are lowercase, (ascii) alpha-numeric and may contain dashes or underscores.",
+            )),
             Warning::DependencyAlreadyExists { .. } => Some(Box::new(
                 "If you need to change the version, try 'aiken packages upgrade' instead.",
             )),
@@ -603,20 +624,63 @@ impl Warning {
 
 impl Debug for Warning {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let miette_handler = MietteHandlerOpts::new()
-            // For better support of terminal themes use the ANSI coloring
-            .rgb_colors(RgbColors::Never)
-            // If ansi support is disabled in the config disable the eye-candy
-            .color(true)
-            .unicode(true)
-            .terminal_links(true)
-            .build();
+        default_miette_handler(0)
+            .debug(
+                &DisplayWarning {
+                    title: &self.to_string(),
+                    source_code: self.source_code(),
+                    labels: self.labels().map(|ls| ls.collect()),
+                    help: self.help().map(|s| s.to_string()),
+                },
+                f,
+            )
+            // Ignore error to prevent format! panics. This can happen if span points at some
+            // inaccessible location, for example by calling `report_error()` with wrong working set.
+            .or(Ok(()))
+    }
+}
 
-        // Ignore error to prevent format! panics. This can happen if span points at some
-        // inaccessible location, for example by calling `report_error()` with wrong working set.
-        let _ = miette_handler.debug(self, f);
+#[derive(thiserror::Error)]
+#[error("{}", title.if_supports_color(Stderr, |s| s.yellow()))]
+struct DisplayWarning<'a> {
+    title: &'a str,
+    source_code: Option<&'a dyn miette::SourceCode>,
+    labels: Option<Vec<LabeledSpan>>,
+    help: Option<String>,
+}
 
-        Ok(())
+impl<'a> Diagnostic for DisplayWarning<'a> {
+    fn severity(&self) -> Option<miette::Severity> {
+        Some(miette::Severity::Warning)
+    }
+
+    fn source_code(&self) -> Option<&dyn SourceCode> {
+        self.source_code
+    }
+
+    fn labels(&self) -> Option<Box<dyn Iterator<Item = LabeledSpan> + '_>> {
+        self.labels
+            .as_ref()
+            .map(|ls| ls.iter().cloned())
+            .map(Box::new)
+            .map(|b| b as Box<dyn Iterator<Item = LabeledSpan>>)
+    }
+
+    fn code<'b>(&'b self) -> Option<Box<dyn Display + 'b>> {
+        None
+    }
+
+    fn help<'b>(&'b self) -> Option<Box<dyn Display + 'b>> {
+        self.help
+            .as_ref()
+            .map(Box::new)
+            .map(|b| b as Box<dyn Display + 'b>)
+    }
+}
+
+impl<'a> Debug for DisplayWarning<'a> {
+    fn fmt(&self, _f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        unreachable!("Display warning are never shown directly.");
     }
 }
 
@@ -626,4 +690,15 @@ pub struct Unformatted {
     pub destination: PathBuf,
     pub input: String,
     pub output: String,
+}
+
+fn default_miette_handler(context_lines: usize) -> MietteHandler {
+    MietteHandlerOpts::new()
+        // For better support of terminal themes use the ANSI coloring
+        .rgb_colors(RgbColors::Never)
+        // If ansi support is disabled in the config disable the eye-candy
+        .unicode(true)
+        .terminal_links(true)
+        .context_lines(context_lines)
+        .build()
 }

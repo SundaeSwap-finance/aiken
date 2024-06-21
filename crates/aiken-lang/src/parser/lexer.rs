@@ -112,7 +112,7 @@ pub fn lexer() -> impl Parser<char, Vec<(Token, Span)>, Error = ParseError> {
         .ignore_then(
             one_of("0123456789abcdefABCDEF")
                 .repeated()
-                .at_least(2)
+                .at_least(1)
                 .collect::<String>(),
         )
         .validate(|value: String, span, emit| {
@@ -223,6 +223,7 @@ pub fn lexer() -> impl Parser<char, Vec<(Token, Span)>, Error = ParseError> {
         // TODO: remove this in a future release
         "error" => Token::Fail,
         "fail" => Token::Fail,
+        "once" => Token::Once,
         "as" => Token::As,
         "and" => Token::And,
         "or" => Token::Or,

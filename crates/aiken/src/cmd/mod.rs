@@ -4,8 +4,11 @@ use clap::Parser;
 pub mod blueprint;
 pub mod build;
 pub mod check;
+// only windows
+#[cfg(not(target_os = "windows"))]
 pub mod completion;
 pub mod docs;
+pub mod export;
 pub mod fmt;
 pub mod lsp;
 pub mod new;
@@ -20,6 +23,8 @@ pub mod uplc;
 pub enum Cmd {
     New(new::Args),
     Fmt(fmt::Args),
+
+    Export(export::Args),
 
     #[clap(visible_alias("b"))]
     Build(build::Args),
@@ -42,6 +47,7 @@ pub enum Cmd {
     #[clap(subcommand)]
     Uplc(uplc::Cmd),
 
+    #[cfg(not(target_os = "windows"))]
     #[clap(subcommand)]
     Completion(completion::Cmd),
 

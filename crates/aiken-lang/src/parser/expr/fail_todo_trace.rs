@@ -1,5 +1,3 @@
-use chumsky::prelude::*;
-
 use crate::{
     ast::TraceKind,
     expr::UntypedExpr,
@@ -9,6 +7,7 @@ use crate::{
         token::Token,
     },
 };
+use chumsky::prelude::*;
 
 pub fn parser<'a>(
     expression: Recursive<'a, Token, UntypedExpr, ParseError>,
@@ -129,7 +128,7 @@ mod tests {
     fn trace_expr_todo() {
         assert_expr!(
             r#"
-            trace some_var 
+            trace some_var
             "#
         );
     }

@@ -1,16 +1,18 @@
 pub mod definitions;
 pub mod error;
+mod memo_program;
 pub mod parameter;
 pub mod schema;
 pub mod validator;
 
+pub use error::Error;
+
 use crate::{
-    config::{self, Config},
+    config::{self, Config, PlutusVersion},
     module::CheckedModules,
 };
 use aiken_lang::gen_uplc::CodeGenerator;
 use definitions::Definitions;
-use error::Error;
 use schema::{Annotated, Schema};
 use std::fmt::Debug;
 use validator::Validator;
@@ -40,13 +42,6 @@ pub struct Preamble {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub license: Option<String>,
-}
-
-#[derive(Debug, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum PlutusVersion {
-    V1,
-    V2,
 }
 
 #[derive(Debug, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
@@ -149,7 +144,7 @@ impl From<&Config> for Preamble {
                 name: "Aiken".to_string(),
                 version: config::compiler_version(true),
             }),
-            plutus_version: PlutusVersion::V2,
+            plutus_version: config.plutus,
             version: config.version.clone(),
             license: config.license.clone(),
         }

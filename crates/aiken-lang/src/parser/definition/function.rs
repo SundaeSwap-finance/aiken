@@ -1,10 +1,9 @@
-use chumsky::prelude::*;
-
 use crate::{
     ast,
     expr::UntypedExpr,
-    parser::{annotation, error::ParseError, expr, token::Token, utils},
+    parser::{annotation, error::ParseError, expr, pattern, token::Token, utils},
 };
+use chumsky::prelude::*;
 
 pub fn parser() -> impl Parser<Token, ast::UntypedDefinition, Error = ParseError> {
     utils::optional_flag(Token::Pub)
@@ -41,7 +40,7 @@ pub fn parser() -> impl Parser<Token, ast::UntypedDefinition, Error = ParseError
                     public,
                     return_annotation,
                     return_type: (),
-                    can_error: true,
+                    on_test_failure: ast::OnTestFailure::FailImmediately,
                 })
             },
         )
@@ -51,40 +50,45 @@ pub fn param(is_validator_param: bool) -> impl Parser<Token, ast::UntypedArg, Er
     choice((
         select! {Token::Name {name} => name}
             .then(select! {Token::DiscardName {name} => name})
-            .map_with_span(|(label, name), span| ast::ArgName::Discarded {
-                label,
-                name,
-                location: span,
+            .map_with_span(|(label, name), span| {
+                ast::ArgBy::ByName(ast::ArgName::Discarded {
+                    label,
+                    name,
+                    location: span,
+                })
             }),
         select! {Token::DiscardName {name} => name}.map_with_span(|name, span| {
-            ast::ArgName::Discarded {
+            ast::ArgBy::ByName(ast::ArgName::Discarded {
                 label: name.clone(),
                 name,
                 location: span,
-            }
+            })
         }),
         select! {Token::Name {name} => name}
             .then(select! {Token::Name {name} => name})
-            .map_with_span(move |(label, name), span| ast::ArgName::Named {
-                label,
+            .map_with_span(|(label, name), span| {
+                ast::ArgBy::ByName(ast::ArgName::Named {
+                    label,
+                    name,
+                    location: span,
+                })
+            }),
+        select! {Token::Name {name} => name}.map_with_span(|name, span| {
+            ast::ArgBy::ByName(ast::ArgName::Named {
+                label: name.clone(),
                 name,
                 location: span,
-                is_validator_param,
-            }),
-        select! {Token::Name {name} => name}.map_with_span(move |name, span| ast::ArgName::Named {
-            label: name.clone(),
-            name,
-            location: span,
-            is_validator_param,
+            })
         }),
+        pattern().map(ast::ArgBy::ByPattern),
     ))
     .then(just(Token::Colon).ignore_then(annotation()).or_not())
-    .map_with_span(|(arg_name, annotation), span| ast::Arg {
+    .map_with_span(move |(by, annotation), span| ast::UntypedArg {
         location: span,
         annotation,
         doc: None,
-        tipo: (),
-        arg_name,
+        is_validator_param,
+        by,
     })
 }
 
@@ -116,6 +120,38 @@ mod tests {
             r#"
             fn run() {
               let x = 1 + 1
+            }
+            "#
+        );
+    }
+
+    #[test]
+    fn function_by_pattern_no_annotation() {
+        assert_definition!(
+            r#"
+            fn foo(Foo { my_field }) {
+                my_field * 2
+            }
+            "#
+        );
+    }
+
+    #[test]
+    fn function_by_pattern_with_annotation() {
+        assert_definition!(
+            r#"
+            fn foo(Foo { my_field }: Foo) {
+                my_field * 2
+            }
+            "#
+        );
+    }
+    #[test]
+    fn function_by_pattern_with_alias() {
+        assert_definition!(
+            r#"
+            fn foo(Foo { my_field, .. } as x) {
+                my_field * x.my_other_field
             }
             "#
         );
