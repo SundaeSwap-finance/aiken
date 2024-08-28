@@ -1,11 +1,11 @@
 use crate::{
-    ast::{DeBruijn, Program},
+    ast::{DeBruijn, NamedDeBruijn, Program},
     machine::cost_model::ExBudget,
     PlutusData,
 };
 use error::Error;
 use pallas_primitives::{
-    conway::{CostMdls, MintedTx, Redeemer, TransactionInput, TransactionOutput},
+    conway::{CostMdls, Language, MintedTx, Redeemer, TransactionInput, TransactionOutput},
     Fragment,
 };
 use pallas_traverse::{Era, MultiEraTx};
@@ -19,6 +19,38 @@ pub mod script_context;
 #[cfg(test)]
 mod tests;
 pub mod to_plutus_data;
+
+pub fn tx_to_programs(
+    tx: &MintedTx,
+    utxos: &[ResolvedInput],
+    slot_config: &SlotConfig,
+) -> Result<Vec<(Redeemer, Program<NamedDeBruijn>, Language)>, Error> {
+    let redeemers = tx.transaction_witness_set.redeemer.as_ref();
+
+    let lookup_table = DataLookupTable::from_transaction(tx, utxos);
+    match redeemers {
+        Some(rs) => {
+            let mut collected_programs = vec![];
+
+            for (redeemer_key, redeemer_value) in rs.iter() {
+                let redeemer = Redeemer {
+                    tag: redeemer_key.tag,
+                    index: redeemer_key.index,
+                    data: redeemer_value.data.clone(),
+                    ex_units: redeemer_value.ex_units,
+                };
+
+                let (program, language) =
+                    eval::redeemer_to_program(tx, utxos, slot_config, &redeemer, &lookup_table)?;
+
+                collected_programs.push((redeemer, program, language));
+            }
+
+            Ok(collected_programs)
+        }
+        None => Ok(vec![]),
+    }
+}
 
 /// Evaluate the scripts in a transaction using
 /// the UPLC Cek Machine. This function collects
@@ -34,7 +66,9 @@ pub fn eval_phase_two(
     run_phase_one: bool,
     with_redeemer: fn(&Redeemer) -> (),
 ) -> Result<Vec<Redeemer>, Error> {
-    let redeemers = tx.transaction_witness_set.redeemer.as_ref();
+    let redeemers = tx_to_programs(tx, utxos, slot_config)?;
+
+    // let redeemers = tx.transaction_witness_set.redeemer.as_ref();
 
     let lookup_table = DataLookupTable::from_transaction(tx, utxos);
 
@@ -43,44 +77,21 @@ pub fn eval_phase_two(
         eval_phase_one(tx, utxos, &lookup_table)?;
     }
 
-    match redeemers {
-        Some(rs) => {
-            let mut collected_redeemers = vec![];
+    let mut collected_redeemers = vec![];
+    let mut remaining_budget = *initial_budget.unwrap_or(&ExBudget::default());
+    for (redeemer, program, language) in redeemers {
+        with_redeemer(&redeemer);
+        let result =
+            eval::eval_redeemer(&redeemer, program, language, cost_mdls, &remaining_budget)?;
+        // The subtraction is safe here as ex units counting is done during evaluation.
+        // Redeemer would fail already if budget was negative.
+        remaining_budget.cpu -= result.ex_units.steps as i64;
+        remaining_budget.mem -= result.ex_units.mem as i64;
 
-            let mut remaining_budget = *initial_budget.unwrap_or(&ExBudget::default());
-
-            for (redeemer_key, redeemer_value) in rs.iter() {
-                let redeemer = Redeemer {
-                    tag: redeemer_key.tag,
-                    index: redeemer_key.index,
-                    data: redeemer_value.data.clone(),
-                    ex_units: redeemer_value.ex_units,
-                };
-
-                with_redeemer(&redeemer);
-
-                let redeemer = eval::eval_redeemer(
-                    tx,
-                    utxos,
-                    slot_config,
-                    &redeemer,
-                    &lookup_table,
-                    cost_mdls,
-                    &remaining_budget,
-                )?;
-
-                // The subtraction is safe here as ex units counting is done during evaluation.
-                // Redeemer would fail already if budget was negative.
-                remaining_budget.cpu -= redeemer.ex_units.steps as i64;
-                remaining_budget.mem -= redeemer.ex_units.mem as i64;
-
-                collected_redeemers.push(redeemer)
-            }
-
-            Ok(collected_redeemers)
-        }
-        None => Ok(vec![]),
+        collected_redeemers.push(result);
     }
+
+    Ok(collected_redeemers)
 }
 
 /// This function is the same as [`eval_phase_two`]
