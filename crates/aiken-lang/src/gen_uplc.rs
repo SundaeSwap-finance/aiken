@@ -5,11 +5,11 @@ pub mod tree;
 use self::{
     air::Air,
     builder::{
-        air_holds_msg, cast_validator_args, constants_ir, convert_type_to_data, extract_constant,
+        cast_validator_args, constants_ir, convert_type_to_data, extract_constant,
         modify_cyclic_calls, modify_self_calls, rearrange_list_clauses, AssignmentProperties,
         ClauseProperties, CodeGenSpecialFuncs, CycleFunctionNames, HoistableFunction, Variant,
     },
-    tree::{AirMsg, AirTree, TreePath},
+    tree::{AirTree, TreePath},
 };
 use crate::{
     ast::{
@@ -17,7 +17,7 @@ use crate::{
         Span, TraceLevel, Tracing, TypedArg, TypedClause, TypedDataType, TypedFunction,
         TypedPattern, TypedValidator, UnOp,
     },
-    builtins::{bool, data, int, list, string, void},
+    builtins::PRELUDE,
     expr::TypedExpr,
     gen_uplc::{
         air::ExpectLevel,
@@ -38,10 +38,12 @@ use crate::{
     },
     IdGenerator,
 };
+use builder::{softcast_data_to_type_otherwise, unknown_data_to_type};
 use indexmap::{IndexMap, IndexSet};
 use itertools::Itertools;
 use petgraph::{algo, Graph};
 use std::{collections::HashMap, rc::Rc};
+use tree::Fields;
 use uplc::{
     ast::{Constant as UplcConstant, Name, NamedDeBruijn, Program, Term, Type as UplcType},
     builder::{CONSTR_FIELDS_EXPOSER, CONSTR_INDEX_EXPOSER, EXPECT_ON_LIST},
@@ -112,26 +114,15 @@ impl<'a> CodeGenerator<'a> {
         }
     }
 
-    pub fn generate(
-        &mut self,
-        TypedValidator {
-            fun,
-            other_fun,
-            params,
-            ..
-        }: &TypedValidator,
-        module_name: &str,
-    ) -> Program<Name> {
-        let mut air_tree_fun = self.build(&fun.body, module_name, &[]);
+    pub fn generate(&mut self, validator: &TypedValidator, module_name: &str) -> Program<Name> {
+        let air_tree_fun = wrap_validator_condition(
+            self.build(&validator.into_script_context_handler(), module_name, &[]),
+            self.tracing,
+        );
 
-        air_tree_fun = wrap_validator_condition(air_tree_fun, self.tracing);
+        let air_tree_fun = AirTree::anon_func(vec!["__context__".to_string()], air_tree_fun, true);
 
-        let (src_code, lines) = self.module_src.get(module_name).unwrap();
-
-        let mut validator_args_tree =
-            self.check_validator_args(&fun.arguments, true, air_tree_fun, src_code, lines);
-
-        validator_args_tree = AirTree::no_op(validator_args_tree);
+        let validator_args_tree = AirTree::no_op(air_tree_fun);
 
         let full_tree = self.hoist_functions_to_validator(validator_args_tree);
 
@@ -139,51 +130,9 @@ impl<'a> CodeGenerator<'a> {
 
         let full_vec = full_tree.to_vec();
 
-        let mut term = self.uplc_code_gen(full_vec);
+        let term = self.uplc_code_gen(full_vec);
 
-        if let Some(other) = other_fun {
-            self.reset(false);
-
-            let mut air_tree_fun_other = self.build(&other.body, module_name, &[]);
-
-            air_tree_fun_other = wrap_validator_condition(air_tree_fun_other, self.tracing);
-
-            let mut validator_args_tree_other = self.check_validator_args(
-                &other.arguments,
-                true,
-                air_tree_fun_other,
-                src_code,
-                lines,
-            );
-
-            validator_args_tree_other = AirTree::no_op(validator_args_tree_other);
-
-            let full_tree_other = self.hoist_functions_to_validator(validator_args_tree_other);
-
-            // optimizations on air tree
-
-            let full_vec_other = full_tree_other.to_vec();
-
-            let other_term = self.uplc_code_gen(full_vec_other);
-
-            let (spend, spend_name, mint, mint_name) =
-                if other.arguments.len() > fun.arguments.len() {
-                    (other_term, other.name.clone(), term, fun.name.clone())
-                } else {
-                    (term, fun.name.clone(), other_term, other.name.clone())
-                };
-
-            // Special Case with multi_validators
-            self.special_functions
-                .use_function_uplc(CONSTR_FIELDS_EXPOSER.to_string());
-
-            self.special_functions
-                .use_function_uplc(CONSTR_INDEX_EXPOSER.to_string());
-
-            term = wrap_as_multi_validator(spend, mint, self.tracing, spend_name, mint_name);
-        }
-
-        term = cast_validator_args(term, params);
+        let term = cast_validator_args(term, &validator.params);
 
         self.finalize(term)
     }
@@ -258,35 +207,29 @@ impl<'a> CodeGenerator<'a> {
 
             let air_value = self.build(value, module_build_name, &[]);
 
-            let msg_func = match self.tracing {
-                TraceLevel::Silent => None,
-                TraceLevel::Verbose | TraceLevel::Compact => {
-                    if kind.is_expect() {
-                        let msg = match self.tracing {
-                            TraceLevel::Silent => unreachable!("excluded from pattern guards"),
-                            TraceLevel::Compact => get_line_columns_by_span(
-                                module_build_name,
-                                location,
-                                &self.module_src,
-                            )
-                            .to_string(),
-                            TraceLevel::Verbose => {
-                                get_src_code_by_span(module_build_name, location, &self.module_src)
-                            }
-                        };
-
-                        let msg_func_name = msg.split_whitespace().join("");
-
-                        self.special_functions.insert_new_function(
-                            msg_func_name.clone(),
-                            Term::string(msg),
-                            string(),
-                        );
-
-                        Some(self.special_functions.use_function_msg(msg_func_name))
-                    } else {
-                        None
+            let otherwise_delayed = {
+                let msg = match (self.tracing, kind) {
+                    (TraceLevel::Silent, _) | (_, AssignmentKind::Let { .. }) => "".to_string(),
+                    (TraceLevel::Compact, _) => {
+                        get_line_columns_by_span(module_build_name, location, &self.module_src)
+                            .to_string()
                     }
+                    (TraceLevel::Verbose, _) => {
+                        get_src_code_by_span(module_build_name, location, &self.module_src)
+                    }
+                };
+
+                let msg_func_name = msg.split_whitespace().join("");
+
+                if msg_func_name.is_empty() {
+                    None
+                } else {
+                    self.special_functions.insert_new_function(
+                        msg_func_name.clone(),
+                        Term::Error.delayed_trace(Term::string(msg)).delay(),
+                        Type::void(),
+                    );
+                    Some(self.special_functions.use_function_tree(msg_func_name))
                 }
             };
 
@@ -304,7 +247,7 @@ impl<'a> CodeGenerator<'a> {
                     kind: *kind,
                     remove_unused: kind.is_let(),
                     full_check: !tipo.is_data() && value.tipo().is_data() && kind.is_expect(),
-                    msg_func,
+                    otherwise: otherwise_delayed,
                 },
             )
         } else {
@@ -337,6 +280,7 @@ impl<'a> CodeGenerator<'a> {
                         .map(|arg| arg.arg_name.get_variable_name().unwrap_or("_").to_string())
                         .collect_vec(),
                     self.build(body, module_build_name, &[]),
+                    false,
                 ),
 
                 TypedExpr::List {
@@ -574,7 +518,7 @@ impl<'a> CodeGenerator<'a> {
                                 kind: AssignmentKind::let_(),
                                 remove_unused: false,
                                 full_check: false,
-                                msg_func: None,
+                                otherwise: None,
                             },
                         )
                     } else {
@@ -625,26 +569,52 @@ impl<'a> CodeGenerator<'a> {
                         )
                     }
                 }
-
+                // let pattern = branch.condition
+                // branch.body
+                //
+                // if <expr:condition> is <pattern>: <annotation> { <expr:body> }
+                // [(builtin ifThenElse) (condition is pattern) (body) (else) ]
                 TypedExpr::If {
                     branches,
                     final_else,
                     tipo,
                     ..
-                } => AirTree::if_branches(
-                    branches
-                        .iter()
-                        .map(|branch| {
-                            (
-                                self.build(&branch.condition, module_build_name, &[]),
-                                self.build(&branch.body, module_build_name, &[]),
-                            )
-                        })
-                        .collect_vec(),
-                    tipo.clone(),
-                    self.build(final_else, module_build_name, &[]),
-                ),
+                } => {
+                    branches.iter().rfold(
+                        self.build(final_else, module_build_name, &[]),
+                        |acc, branch| {
+                            let condition = self.build(&branch.condition, module_build_name, &[]);
+                            let body = self.build(&branch.body, module_build_name, &[]);
 
+                            match &branch.is {
+                                Some((pattern, tipo)) => {
+                                    AirTree::let_assignment(
+                                        "acc_var",
+                                        // use anon function as a delay to avoid evaluating the acc
+                                        AirTree::anon_func(vec![], acc, true),
+                                        self.assignment(
+                                            pattern,
+                                            condition,
+                                            body,
+                                            tipo,
+                                            AssignmentProperties {
+                                                value_type: branch.condition.tipo(),
+                                                kind: AssignmentKind::Expect { backpassing: () },
+                                                remove_unused: false,
+                                                full_check: true,
+                                                otherwise: Some(AirTree::local_var(
+                                                    "acc_var",
+                                                    tipo.clone(),
+                                                )),
+                                            },
+                                        ),
+                                    )
+                                }
+                                None => AirTree::if_branch(tipo.clone(), condition, body, acc),
+                            }
+                        },
+                    )
+                }
                 TypedExpr::RecordAccess {
                     tipo,
                     index,
@@ -662,17 +632,21 @@ impl<'a> CodeGenerator<'a> {
                         let function_name = format!("__access_index_{}", *index);
 
                         if self.code_gen_functions.get(&function_name).is_none() {
-                            let mut body = AirTree::local_var("__fields", list(data()));
+                            let mut body = AirTree::local_var("__fields", Type::list(Type::data()));
 
                             for _ in 0..*index {
                                 body = AirTree::builtin(
                                     DefaultFunction::TailList,
-                                    list(data()),
+                                    Type::list(Type::data()),
                                     vec![body],
                                 )
                             }
 
-                            body = AirTree::builtin(DefaultFunction::HeadList, data(), vec![body]);
+                            body = AirTree::builtin(
+                                DefaultFunction::HeadList,
+                                Type::data(),
+                                vec![body],
+                            );
 
                             self.code_gen_functions.insert(
                                 function_name.clone(),
@@ -686,7 +660,7 @@ impl<'a> CodeGenerator<'a> {
                         let list_of_fields = AirTree::call(
                             self.special_functions
                                 .use_function_tree(CONSTR_FIELDS_EXPOSER.to_string()),
-                            list(data()),
+                            Type::list(Type::data()),
                             vec![self.build(record, module_build_name, &[])],
                         );
 
@@ -731,7 +705,19 @@ impl<'a> CodeGenerator<'a> {
                     }
                     ModuleValueConstructor::Fn { name, module, .. } => {
                         let func = self.functions.get(&FunctionAccessKey {
-                            module_name: module_name.clone(),
+                            // NOTE: This is needed because we register prelude functions under an
+                            // empty module name. This is to facilitate their access when used
+                            // directly. Note that, if we weren't doing this particular
+                            // transformation, we would need to do the other direction anyway:
+                            //
+                            //     if module_name.is_empty() { PRELUDE.to_string() } else { module_name.clone() }
+                            //
+                            // So either way, we need to take care of this.
+                            module_name: if module_name == PRELUDE {
+                                String::new()
+                            } else {
+                                module_name.clone()
+                            },
                             function_name: name.clone(),
                         });
 
@@ -789,17 +775,21 @@ impl<'a> CodeGenerator<'a> {
                         let function_name = format!("__access_index_{}", *index);
 
                         if self.code_gen_functions.get(&function_name).is_none() {
-                            let mut body = AirTree::local_var("__fields", list(data()));
+                            let mut body = AirTree::local_var("__fields", Type::list(Type::data()));
 
                             for _ in 0..*index {
                                 body = AirTree::builtin(
                                     DefaultFunction::TailList,
-                                    list(data()),
+                                    Type::list(Type::data()),
                                     vec![body],
                                 )
                             }
 
-                            body = AirTree::builtin(DefaultFunction::HeadList, data(), vec![body]);
+                            body = AirTree::builtin(
+                                DefaultFunction::HeadList,
+                                Type::data(),
+                                vec![body],
+                            );
 
                             self.code_gen_functions.insert(
                                 function_name.clone(),
@@ -861,7 +851,7 @@ impl<'a> CodeGenerator<'a> {
     pub fn assignment(
         &mut self,
         pattern: &TypedPattern,
-        mut value: AirTree,
+        value: AirTree,
         then: AirTree,
         tipo: &Rc<Type>,
         props: AssignmentProperties,
@@ -877,11 +867,39 @@ impl<'a> CodeGenerator<'a> {
         );
 
         // Cast value to or from data so we don't have to worry from this point onward
-        if props.value_type.is_data() && props.kind.is_expect() && !tipo.is_data() {
-            value = AirTree::cast_from_data(value, tipo.clone(), props.msg_func.clone());
-        } else if !props.value_type.is_data() && tipo.is_data() {
-            value = AirTree::cast_to_data(value, props.value_type.clone());
-        }
+        let assign_casted_value = |name, value, then| {
+            if props.value_type.is_data() && props.kind.is_expect() && !tipo.is_data() {
+                if props.otherwise.is_some() {
+                    AirTree::soft_cast_assignment(
+                        name,
+                        tipo.clone(),
+                        value,
+                        then,
+                        props.otherwise.as_ref().unwrap().clone(),
+                    )
+                } else {
+                    AirTree::let_assignment(
+                        name,
+                        AirTree::cast_from_data(value, tipo.clone(), true),
+                        then,
+                    )
+                }
+            } else if !props.value_type.is_data() && tipo.is_data() {
+                AirTree::let_assignment(
+                    name,
+                    AirTree::cast_to_data(value, props.value_type.clone()),
+                    then,
+                )
+            } else {
+                AirTree::let_assignment(name, value, then)
+            }
+        };
+
+        let otherwise = match &props.otherwise {
+            Some(x) => x.clone(),
+            // (delay (error ))
+            None => AirTree::anon_func(vec![], AirTree::error(Type::void(), false), true),
+        };
 
         match pattern {
             Pattern::Int {
@@ -889,8 +907,6 @@ impl<'a> CodeGenerator<'a> {
                 location,
                 ..
             } => {
-                assert!(props.kind.is_expect());
-
                 let name = format!(
                     "__expected_by_{}_span_{}_{}",
                     expected_int, location.start, location.end
@@ -898,15 +914,39 @@ impl<'a> CodeGenerator<'a> {
 
                 let expect = AirTree::binop(
                     BinOp::Eq,
-                    bool(),
+                    Type::bool(),
                     AirTree::int(expected_int),
-                    AirTree::local_var(&name, int()),
-                    int(),
+                    AirTree::local_var(&name, Type::int()),
+                    Type::int(),
                 );
 
-                let expr = AirTree::let_assignment(name, value, expect);
+                assign_casted_value(
+                    name,
+                    value,
+                    AirTree::assert_bool(true, expect, then, otherwise),
+                )
+            }
 
-                AirTree::assert_bool(true, expr, props.msg_func.clone(), then)
+            Pattern::ByteArray {
+                value: expected_bytes,
+                location,
+                ..
+            } => {
+                let name = format!("__expected_bytes_span_{}_{}", location.start, location.end);
+
+                let expect = AirTree::binop(
+                    BinOp::Eq,
+                    Type::bool(),
+                    AirTree::byte_array(expected_bytes.clone()),
+                    AirTree::local_var(&name, Type::byte_array()),
+                    Type::byte_array(),
+                );
+
+                assign_casted_value(
+                    name,
+                    value,
+                    AirTree::assert_bool(true, expect, then, otherwise),
+                )
             }
 
             Pattern::Var { name, .. } => {
@@ -918,26 +958,29 @@ impl<'a> CodeGenerator<'a> {
                     let val = AirTree::local_var(name, tipo.clone());
 
                     if non_opaque_tipo.is_primitive() {
-                        AirTree::let_assignment(name, value, then)
+                        assign_casted_value(name.clone(), value, then)
                     } else {
-                        let expect = self.expect_type_assign(
-                            &non_opaque_tipo,
-                            val,
-                            &mut index_map,
-                            pattern.location(),
-                            props.msg_func,
-                        );
-
-                        let assign_expect = AirTree::let_assignment("_", expect, then);
-
-                        AirTree::let_assignment(name, value, assign_expect)
+                        assign_casted_value(
+                            name.clone(),
+                            value,
+                            self.expect_type_assign(
+                                &non_opaque_tipo,
+                                val,
+                                &mut index_map,
+                                pattern.location(),
+                                then,
+                                otherwise,
+                                0,
+                            ),
+                        )
                     }
                 } else {
-                    AirTree::let_assignment(name, value, then)
+                    assign_casted_value(name.clone(), value, then)
                 }
             }
 
             Pattern::Assign { name, pattern, .. } => {
+                // Don't need any data casting for Assign
                 let inner_pattern = self.assignment(
                     pattern,
                     AirTree::local_var(name, tipo.clone()),
@@ -950,32 +993,34 @@ impl<'a> CodeGenerator<'a> {
 
             Pattern::Discard { name, .. } => {
                 if props.full_check {
-                    let name = &format!("__discard_expect_{}", name);
+                    let name = format!("__discard_expect_{}", name);
                     let mut index_map = IndexMap::new();
 
                     let non_opaque_tipo = convert_opaque_type(tipo, &self.data_types, true);
 
-                    let val = AirTree::local_var(name, tipo.clone());
+                    let val = AirTree::local_var(&name, tipo.clone());
 
                     if non_opaque_tipo.is_primitive() {
-                        AirTree::let_assignment(name, value, then)
+                        assign_casted_value(name, value, then)
                     } else {
-                        let expect = self.expect_type_assign(
-                            &non_opaque_tipo,
-                            val,
-                            &mut index_map,
-                            pattern.location(),
-                            props.msg_func,
-                        );
-
-                        let assignment = AirTree::let_assignment("_", expect, then);
-
-                        AirTree::let_assignment(name, value, assignment)
+                        assign_casted_value(
+                            name,
+                            value,
+                            self.expect_type_assign(
+                                &non_opaque_tipo,
+                                val,
+                                &mut index_map,
+                                pattern.location(),
+                                then,
+                                otherwise,
+                                0,
+                            ),
+                        )
                     }
                 } else if !props.remove_unused {
-                    AirTree::let_assignment(name, value, then)
+                    assign_casted_value(name.clone(), value, then)
                 } else {
-                    AirTree::no_op(then)
+                    then
                 }
             }
 
@@ -997,6 +1042,7 @@ impl<'a> CodeGenerator<'a> {
                     Some(tail) => {
                         let tail_name = match tail.as_ref() {
                             Pattern::Var { name, .. } => name.to_string(),
+                            // This Pattern one doesn't even make sense
                             Pattern::Assign { name, .. } => name.to_string(),
                             Pattern::Discard { name, .. } => {
                                 if props.full_check {
@@ -1005,6 +1051,7 @@ impl<'a> CodeGenerator<'a> {
                                     "_".to_string()
                                 }
                             }
+                            // This should be unreachable
                             _ => format!(
                                 "tail_span_{}_{}",
                                 tail.location().start,
@@ -1023,9 +1070,12 @@ impl<'a> CodeGenerator<'a> {
                                 AssignmentProperties {
                                     value_type: tipo.clone(),
                                     kind: props.kind,
+                                    // The reason the top level of recursion might have remove_unused
+                                    // false is to deal with expect _ = thing
+                                    //                       next_thing
                                     remove_unused: true,
                                     full_check: props.full_check,
-                                    msg_func: props.msg_func.clone(),
+                                    otherwise: props.otherwise.clone(),
                                 },
                             )
                         } else {
@@ -1073,7 +1123,7 @@ impl<'a> CodeGenerator<'a> {
                                     kind: props.kind,
                                     remove_unused: true,
                                     full_check: props.full_check,
-                                    msg_func: props.msg_func.clone(),
+                                    otherwise: props.otherwise.clone(),
                                 },
                             )
                         } else {
@@ -1087,21 +1137,37 @@ impl<'a> CodeGenerator<'a> {
 
                 elems.reverse();
 
+                let name = format!(
+                    "__List_span_{}_{}",
+                    pattern.location().start,
+                    pattern.location().end
+                );
+
+                let casted_var = AirTree::local_var(&name, tipo.clone());
+
                 if elements.is_empty() {
-                    AirTree::list_empty(value, props.msg_func, then)
-                } else {
-                    AirTree::list_access(
-                        elems,
-                        tipo.clone(),
-                        tail.is_some(),
+                    assign_casted_value(
+                        name,
                         value,
-                        props.msg_func,
-                        if props.full_check {
-                            ExpectLevel::Full
-                        } else {
-                            ExpectLevel::Items
-                        },
-                        then,
+                        AirTree::list_empty(casted_var, then, otherwise),
+                    )
+                } else {
+                    assign_casted_value(
+                        name,
+                        value,
+                        AirTree::list_access(
+                            elems,
+                            tipo.clone(),
+                            tail.is_some(),
+                            casted_var,
+                            if props.full_check {
+                                ExpectLevel::Full
+                            } else {
+                                ExpectLevel::Items
+                            },
+                            then,
+                            otherwise,
+                        ),
                     )
                 }
             }
@@ -1164,7 +1230,7 @@ impl<'a> CodeGenerator<'a> {
                                     kind: props.kind,
                                     remove_unused: true,
                                     full_check: props.full_check,
-                                    msg_func: props.msg_func.clone(),
+                                    otherwise: props.otherwise.clone(),
                                 },
                             )
                         } else {
@@ -1181,8 +1247,7 @@ impl<'a> CodeGenerator<'a> {
                 // This `value` is either value param that was passed in or
                 // local var
                 let constructor_name = format!(
-                    "__constructor_{}_span_{}_{}",
-                    "Pair",
+                    "Pair_span_{}_{}",
                     pattern.location().start,
                     pattern.location().end
                 );
@@ -1190,11 +1255,6 @@ impl<'a> CodeGenerator<'a> {
                 let local_value = AirTree::local_var(&constructor_name, tipo.clone());
 
                 let then = {
-                    let (is_expect, msg) = if props.full_check {
-                        (true, props.msg_func.clone())
-                    } else {
-                        (false, None)
-                    };
                     assert!(fields.len() == 2);
 
                     AirTree::pair_access(
@@ -1208,13 +1268,13 @@ impl<'a> CodeGenerator<'a> {
                             .unwrap(),
                         tipo.clone(),
                         local_value,
-                        msg,
-                        is_expect,
+                        props.full_check,
                         then,
+                        otherwise,
                     )
                 };
 
-                AirTree::let_assignment(constructor_name, value, then)
+                assign_casted_value(constructor_name, value, then)
             }
 
             Pattern::Constructor {
@@ -1223,13 +1283,25 @@ impl<'a> CodeGenerator<'a> {
             } if tipo.is_bool() => {
                 assert!(props.kind.is_expect());
 
-                AirTree::assert_bool(name == "True", value, props.msg_func, then)
+                let name_var = format!(
+                    "__Bool_{}_{}",
+                    pattern.location().start,
+                    pattern.location().end
+                );
+
+                let local_var = AirTree::local_var(&name_var, tipo.clone());
+
+                assign_casted_value(
+                    name_var,
+                    value,
+                    AirTree::assert_bool(name == "True", local_var, then, otherwise),
+                )
             }
 
             Pattern::Constructor { .. } if tipo.is_void() => {
                 // Void type is checked when casting from data
                 // So we just assign the value and move on
-                AirTree::let_assignment("_", value, then)
+                assign_casted_value("_".to_string(), value, then)
             }
 
             Pattern::Constructor {
@@ -1254,7 +1326,13 @@ impl<'a> CodeGenerator<'a> {
                     type_map.insert(index, field_type);
                 }
 
-                assert!(type_map.len() >= arguments.len());
+                assert!(
+                    type_map.len() >= arguments.len(),
+                    "type map len: {}, arguments len: {}; for constructor {:?}",
+                    type_map.len(),
+                    arguments.len(),
+                    name,
+                );
 
                 let mut fields = vec![];
 
@@ -1308,7 +1386,7 @@ impl<'a> CodeGenerator<'a> {
                                     kind: props.kind,
                                     remove_unused: true,
                                     full_check: props.full_check,
-                                    msg_func: props.msg_func.clone(),
+                                    otherwise: props.otherwise.clone(),
                                 },
                             )
                         } else {
@@ -1331,24 +1409,34 @@ impl<'a> CodeGenerator<'a> {
                     pattern.location().end
                 );
 
+                let subject_name = format!(
+                    "__subject_{}_span_{}_{}",
+                    name,
+                    pattern.location().start,
+                    pattern.location().end
+                );
+
                 let local_value = AirTree::local_var(&constructor_name, tipo.clone());
 
                 let then = if check_replaceable_opaque_type(tipo, &self.data_types) {
                     AirTree::let_assignment(&fields[0].1, local_value, then)
                 } else {
-                    let (is_expect, msg) = if props.full_check {
-                        (true, props.msg_func.clone())
-                    } else {
-                        (false, None)
-                    };
-                    AirTree::fields_expose(fields, local_value, msg, is_expect, then)
+                    AirTree::fields_expose(
+                        fields,
+                        local_value,
+                        props.full_check,
+                        then,
+                        otherwise.clone(),
+                    )
                 };
 
                 let data_type = lookup_data_type_by_tipo(&self.data_types, tipo)
                     .unwrap_or_else(|| unreachable!("Failed to find definition for {}", name));
 
                 let then = if props.kind.is_expect()
-                    && (data_type.constructors.len() > 1 || props.full_check)
+                    && (data_type.constructors.len() > 1
+                        || props.full_check
+                        || data_type.is_never())
                 {
                     let (index, _) = data_type
                         .constructors
@@ -1359,17 +1447,30 @@ impl<'a> CodeGenerator<'a> {
                             panic!("Found constructor type {} with 0 constructors", name)
                         });
 
-                    AirTree::assert_constr_index(
-                        index,
+                    AirTree::when(
+                        &subject_name,
+                        Type::void(),
+                        tipo.clone(),
                         AirTree::local_var(&constructor_name, tipo.clone()),
-                        props.msg_func,
-                        then,
+                        AirTree::assert_constr_index(
+                            index,
+                            AirTree::local_var(&subject_name, tipo.clone()),
+                            then,
+                            otherwise,
+                        ),
                     )
                 } else {
+                    assert!(
+                        data_type.constructors.len() == 1 || data_type.is_never(),
+                        "attempted let-assignment on a type with more or less than 1 constructor: \nis_expect? {}\nfull_check? {}\ndata_type={data_type:#?}\n{}",
+                        props.kind.is_expect(),
+                        props.full_check,
+                        name,
+                    );
                     then
                 };
 
-                AirTree::let_assignment(constructor_name, value, then)
+                assign_casted_value(constructor_name, value, then)
             }
 
             Pattern::Tuple {
@@ -1425,7 +1526,7 @@ impl<'a> CodeGenerator<'a> {
                                 kind: props.kind,
                                 remove_unused: true,
                                 full_check: props.full_check,
-                                msg_func: props.msg_func.clone(),
+                                otherwise: props.otherwise.clone(),
                             },
                         )
                     } else {
@@ -1439,28 +1540,48 @@ impl<'a> CodeGenerator<'a> {
 
                 fields.reverse();
 
-                let (is_expect, msg) = if props.full_check {
-                    (true, props.msg_func)
-                } else {
-                    (false, None)
-                };
-
                 // This `value` is either value param that was passed in or local var
 
-                AirTree::tuple_access(fields, tipo.clone(), value, msg, is_expect, then)
+                let name = format!(
+                    "__Tuple_span_{}_{}",
+                    pattern.location().start,
+                    pattern.location().end
+                );
+
+                let local_var = AirTree::local_var(&name, tipo.clone());
+
+                assign_casted_value(
+                    name,
+                    value,
+                    AirTree::tuple_access(
+                        fields,
+                        tipo.clone(),
+                        local_var,
+                        props.full_check,
+                        then,
+                        otherwise,
+                    ),
+                )
             }
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn expect_type_assign(
         &mut self,
         tipo: &Rc<Type>,
         value: AirTree,
         defined_data_types: &mut IndexMap<String, u64>,
         location: Span,
-        msg_func: Option<AirMsg>,
+        then: AirTree,
+        otherwise: AirTree,
+        depth: usize,
     ) -> AirTree {
-        assert!(tipo.get_generic().is_none());
+        assert!(
+            tipo.get_generic().is_none(),
+            "left-hand side of expect is generic: {}",
+            tipo.to_pretty(0)
+        );
         // Shouldn't be needed but still here just in case
         // this function is called from anywhere else besides assignment
         let tipo = &convert_opaque_type(tipo, &self.data_types, true);
@@ -1468,6 +1589,7 @@ impl<'a> CodeGenerator<'a> {
 
         match uplc_type {
             // primitives
+            // Untyped Data
             Some(
                 UplcType::Integer
                 | UplcType::String
@@ -1476,10 +1598,9 @@ impl<'a> CodeGenerator<'a> {
                 | UplcType::Unit
                 | UplcType::Bls12_381G1Element
                 | UplcType::Bls12_381G2Element
-                | UplcType::Bls12_381MlResult,
-            ) => value,
-            // Untyped Data
-            Some(UplcType::Data) => value,
+                | UplcType::Bls12_381MlResult
+                | UplcType::Data,
+            ) => then,
 
             // Map type
             Some(UplcType::List(_)) if tipo.is_map() => {
@@ -1495,38 +1616,80 @@ impl<'a> CodeGenerator<'a> {
                 let fst_name = format!("__pair_fst_span_{}_{}", location.start, location.end);
                 let snd_name = format!("__pair_snd_span_{}_{}", location.start, location.end);
 
-                let expect_fst = self.expect_type_assign(
-                    &inner_pair_types[0],
-                    AirTree::local_var(fst_name.clone(), inner_pair_types[0].clone()),
-                    defined_data_types,
-                    location,
-                    msg_func.clone(),
-                );
-
                 let expect_snd = self.expect_type_assign(
                     &inner_pair_types[1],
                     AirTree::local_var(snd_name.clone(), inner_pair_types[1].clone()),
                     defined_data_types,
                     location,
-                    msg_func.clone(),
+                    AirTree::call(
+                        AirTree::local_var(
+                            format!("__curried_expect_on_list_{}", depth),
+                            Type::void(),
+                        ),
+                        Type::void(),
+                        vec![AirTree::builtin(
+                            DefaultFunction::TailList,
+                            Type::list(Type::data()),
+                            vec![AirTree::local_var(
+                                format!("__list_{}", depth),
+                                tipo.clone(),
+                            )],
+                        )],
+                    ),
+                    otherwise.clone(),
+                    depth + 1,
                 );
 
-                let anon_func_body = AirTree::pair_access(
-                    Some(fst_name),
-                    Some(snd_name),
-                    inner_list_type.clone(),
-                    AirTree::local_var(&pair_name, inner_list_type.clone()),
-                    msg_func.clone(),
-                    true,
-                    AirTree::let_assignment("_", expect_fst, expect_snd),
+                let expect_fst = self.expect_type_assign(
+                    &inner_pair_types[0],
+                    AirTree::local_var(fst_name.clone(), inner_pair_types[0].clone()),
+                    defined_data_types,
+                    location,
+                    expect_snd,
+                    otherwise.clone(),
+                    depth + 1,
                 );
 
-                let unwrap_function = AirTree::anon_func(vec![pair_name], anon_func_body);
+                let unwrap_function = AirTree::anon_func(
+                    vec![
+                        format!("__list_{}", depth),
+                        format!("__curried_expect_on_list_{}", depth),
+                    ],
+                    AirTree::list_empty(
+                        AirTree::local_var(format!("__list_{}", depth), tipo.clone()),
+                        then,
+                        AirTree::anon_func(
+                            vec![],
+                            AirTree::let_assignment(
+                                &pair_name,
+                                AirTree::builtin(
+                                    DefaultFunction::HeadList,
+                                    Type::pair(Type::data(), Type::data()),
+                                    vec![AirTree::local_var(
+                                        format!("__list_{}", depth),
+                                        tipo.clone(),
+                                    )],
+                                ),
+                                AirTree::pair_access(
+                                    Some(fst_name),
+                                    Some(snd_name),
+                                    inner_list_type.clone(),
+                                    AirTree::local_var(&pair_name, inner_list_type.clone()),
+                                    true,
+                                    expect_fst,
+                                    otherwise.clone(),
+                                ),
+                            ),
+                            true,
+                        ),
+                    ),
+                    false,
+                );
 
                 let function = self.code_gen_functions.get(EXPECT_ON_LIST);
 
                 if function.is_none() {
-                    let expect_list_func = AirTree::expect_on_list();
+                    let expect_list_func = AirTree::expect_on_list2();
                     self.code_gen_functions.insert(
                         EXPECT_ON_LIST.to_string(),
                         CodeGenFunction::Function {
@@ -1545,7 +1708,7 @@ impl<'a> CodeGenerator<'a> {
                 let func_call = AirTree::call(
                     AirTree::var(
                         ValueConstructor::public(
-                            void(),
+                            Type::void(),
                             ValueConstructorVariant::ModuleFn {
                                 name: EXPECT_ON_LIST.to_string(),
                                 field_map: None,
@@ -1558,7 +1721,7 @@ impl<'a> CodeGenerator<'a> {
                         EXPECT_ON_LIST,
                         "",
                     ),
-                    void(),
+                    Type::void(),
                     vec![AirTree::local_var(&map_name, tipo.clone()), unwrap_function],
                 );
 
@@ -1574,27 +1737,30 @@ impl<'a> CodeGenerator<'a> {
 
                 let mut tuple_expect_items = vec![];
 
-                let then = tuple_inner_types.iter().enumerate().rfold(
-                    AirTree::void(),
-                    |then, (index, arg)| {
-                        let tuple_index_name = format!(
-                            "__tuple_index_{}_span_{}_{}",
-                            index, location.start, location.end
-                        );
+                let then =
+                    tuple_inner_types
+                        .iter()
+                        .enumerate()
+                        .rfold(then, |then, (index, arg)| {
+                            let tuple_index_name = format!(
+                                "__tuple_index_{}_span_{}_{}",
+                                index, location.start, location.end
+                            );
 
-                        let expect_tuple_item = self.expect_type_assign(
-                            arg,
-                            AirTree::local_var(&tuple_index_name, arg.clone()),
-                            defined_data_types,
-                            location,
-                            msg_func.clone(),
-                        );
+                            let expect_tuple_item = self.expect_type_assign(
+                                arg,
+                                AirTree::local_var(&tuple_index_name, arg.clone()),
+                                defined_data_types,
+                                location,
+                                then,
+                                otherwise.clone(),
+                                depth + 1,
+                            );
 
-                        tuple_expect_items.push(tuple_index_name);
+                            tuple_expect_items.push(tuple_index_name);
 
-                        AirTree::let_assignment("_", expect_tuple_item, then)
-                    },
-                );
+                            expect_tuple_item
+                        });
 
                 tuple_expect_items.reverse();
 
@@ -1602,9 +1768,9 @@ impl<'a> CodeGenerator<'a> {
                     tuple_expect_items,
                     tipo.clone(),
                     AirTree::local_var(&tuple_name, tipo.clone()),
-                    msg_func,
                     true,
                     then,
+                    otherwise,
                 );
 
                 AirTree::let_assignment(&tuple_name, value, tuple_access)
@@ -1616,31 +1782,71 @@ impl<'a> CodeGenerator<'a> {
                 let inner_list_type = &tipo.get_inner_types()[0];
 
                 if inner_list_type.is_data() {
-                    value
+                    then
                 } else {
                     let list_name = format!("__list_span_{}_{}", location.start, location.end);
                     let item_name = format!("__item_span_{}_{}", location.start, location.end);
 
-                    let expect_item = self.expect_type_assign(
-                        inner_list_type,
-                        AirTree::cast_from_data(
-                            AirTree::local_var(&item_name, data()),
-                            inner_list_type.clone(),
-                            msg_func.clone(),
+                    let unwrap_function = AirTree::anon_func(
+                        vec![
+                            format!("__list_{}", depth),
+                            format!("__curried_expect_on_list_{}", depth),
+                        ],
+                        AirTree::list_empty(
+                            AirTree::local_var(format!("__list_{}", depth), tipo.clone()),
+                            then,
+                            AirTree::anon_func(
+                                vec![],
+                                AirTree::let_assignment(
+                                    &item_name,
+                                    AirTree::builtin(
+                                        DefaultFunction::HeadList,
+                                        Type::data(),
+                                        vec![AirTree::local_var(
+                                            format!("__list_{}", depth),
+                                            tipo.clone(),
+                                        )],
+                                    ),
+                                    AirTree::soft_cast_assignment(
+                                        &item_name,
+                                        inner_list_type.clone(),
+                                        AirTree::local_var(&item_name, Type::data()),
+                                        self.expect_type_assign(
+                                            inner_list_type,
+                                            AirTree::local_var(&item_name, inner_list_type.clone()),
+                                            defined_data_types,
+                                            location,
+                                            AirTree::call(
+                                                AirTree::local_var(
+                                                    format!("__curried_expect_on_list_{}", depth),
+                                                    Type::void(),
+                                                ),
+                                                Type::void(),
+                                                vec![AirTree::builtin(
+                                                    DefaultFunction::TailList,
+                                                    Type::list(Type::data()),
+                                                    vec![AirTree::local_var(
+                                                        format!("__list_{}", depth),
+                                                        tipo.clone(),
+                                                    )],
+                                                )],
+                                            ),
+                                            otherwise.clone(),
+                                            depth + 1,
+                                        ),
+                                        otherwise,
+                                    ),
+                                ),
+                                true,
+                            ),
                         ),
-                        defined_data_types,
-                        location,
-                        msg_func,
+                        false,
                     );
-
-                    let anon_func_body = expect_item;
-
-                    let unwrap_function = AirTree::anon_func(vec![item_name], anon_func_body);
 
                     let function = self.code_gen_functions.get(EXPECT_ON_LIST);
 
                     if function.is_none() {
-                        let expect_list_func = AirTree::expect_on_list();
+                        let expect_list_func = AirTree::expect_on_list2();
                         self.code_gen_functions.insert(
                             EXPECT_ON_LIST.to_string(),
                             CodeGenFunction::Function {
@@ -1662,7 +1868,7 @@ impl<'a> CodeGenerator<'a> {
                     let func_call = AirTree::call(
                         AirTree::var(
                             ValueConstructor::public(
-                                void(),
+                                Type::void(),
                                 ValueConstructorVariant::ModuleFn {
                                     name: EXPECT_ON_LIST.to_string(),
                                     field_map: None,
@@ -1675,7 +1881,7 @@ impl<'a> CodeGenerator<'a> {
                             EXPECT_ON_LIST,
                             "",
                         ),
-                        void(),
+                        Type::void(),
                         vec![
                             AirTree::local_var(&list_name, tipo.clone()),
                             unwrap_function,
@@ -1696,20 +1902,24 @@ impl<'a> CodeGenerator<'a> {
                 let fst_name = format!("__pair_fst_span_{}_{}", location.start, location.end);
                 let snd_name = format!("__pair_snd_span_{}_{}", location.start, location.end);
 
-                let expect_fst = self.expect_type_assign(
-                    &tuple_inner_types[0],
-                    AirTree::local_var(fst_name.clone(), tuple_inner_types[0].clone()),
-                    defined_data_types,
-                    location,
-                    msg_func.clone(),
-                );
-
                 let expect_snd = self.expect_type_assign(
                     &tuple_inner_types[1],
                     AirTree::local_var(snd_name.clone(), tuple_inner_types[1].clone()),
                     defined_data_types,
                     location,
-                    msg_func.clone(),
+                    then,
+                    otherwise.clone(),
+                    depth + 1,
+                );
+
+                let expect_fst = self.expect_type_assign(
+                    &tuple_inner_types[0],
+                    AirTree::local_var(fst_name.clone(), tuple_inner_types[0].clone()),
+                    defined_data_types,
+                    location,
+                    expect_snd,
+                    otherwise.clone(),
+                    depth + 1,
                 );
 
                 let pair_access = AirTree::pair_access(
@@ -1717,9 +1927,9 @@ impl<'a> CodeGenerator<'a> {
                     Some(snd_name.clone()),
                     tipo.clone(),
                     AirTree::local_var(&pair_name, tipo.clone()),
-                    msg_func.clone(),
                     true,
-                    AirTree::let_assignment("_", expect_fst, expect_snd),
+                    expect_fst,
+                    otherwise,
                 );
 
                 AirTree::let_assignment(&pair_name, value, pair_access)
@@ -1757,33 +1967,37 @@ impl<'a> CodeGenerator<'a> {
 
                 // mutate code_gen_funcs and defined_data_types in this if branch
                 if function.is_none() && defined_data_types.get(&data_type_name).is_none() {
-                    let (msg_term, error_term) = match self.tracing {
-                        TraceLevel::Silent => (None, AirTree::error(tipo.clone(), false)),
-                        TraceLevel::Compact | TraceLevel::Verbose => {
-                            let msg = AirMsg::LocalVar("__param_msg".to_string());
-                            (
-                                Some(msg.clone()),
-                                AirTree::trace(
-                                    msg.to_air_tree(),
-                                    tipo.clone(),
-                                    AirTree::error(tipo.clone(), false),
-                                ),
-                            )
-                        }
-                    };
-
                     defined_data_types.insert(data_type_name.clone(), 1);
 
                     let current_defined = defined_data_types.clone();
                     let mut diff_defined_types = vec![];
 
+                    let var_then = AirTree::call(
+                        AirTree::local_var("then_delayed", Type::void()),
+                        Type::void(),
+                        vec![],
+                    );
+
+                    let otherwise_delayed = AirTree::local_var("otherwise_delayed", Type::void());
+
+                    let is_never = data_type.is_never();
+
                     let constr_clauses = data_type.constructors.iter().enumerate().rfold(
-                        error_term,
+                        otherwise_delayed.clone(),
                         |acc, (index, constr)| {
+                            // NOTE: For the Never type, we have an placeholder first constructor
+                            // that must be ignored. The Never type is considered to have only one
+                            // constructor starting at index 1 so it shouldn't be possible to
+                            // cast from Data into the first constructor. There's virtually no
+                            // constructor at index 0.
+                            if is_never && index == 0 {
+                                return acc;
+                            }
+
                             let mut constr_args = vec![];
 
                             let constr_then = constr.arguments.iter().enumerate().rfold(
-                                AirTree::void(),
+                                var_then.clone(),
                                 |then, (index, arg)| {
                                     let arg_name =
                                         arg.label.clone().unwrap_or(format!("__field_{index}"));
@@ -1793,16 +2007,14 @@ impl<'a> CodeGenerator<'a> {
 
                                     constr_args.push((index, arg_name.clone(), arg_tipo.clone()));
 
-                                    AirTree::let_assignment(
-                                        "_",
-                                        self.expect_type_assign(
-                                            &arg_tipo.clone(),
-                                            AirTree::local_var(arg_name, arg_tipo),
-                                            defined_data_types,
-                                            location,
-                                            msg_term.clone(),
-                                        ),
+                                    self.expect_type_assign(
+                                        &arg_tipo.clone(),
+                                        AirTree::local_var(arg_name, arg_tipo),
+                                        defined_data_types,
+                                        location,
                                         then,
+                                        otherwise_delayed.clone(),
+                                        depth + 1,
                                     )
                                 },
                             );
@@ -1817,8 +2029,8 @@ impl<'a> CodeGenerator<'a> {
                                         ),
                                         tipo.clone(),
                                     ),
-                                    msg_term.clone(),
                                     constr_then,
+                                    otherwise_delayed.clone(),
                                 )
                             } else {
                                 AirTree::fields_expose(
@@ -1830,32 +2042,41 @@ impl<'a> CodeGenerator<'a> {
                                         ),
                                         tipo.clone(),
                                     ),
-                                    msg_term.clone(),
                                     true,
                                     constr_then,
+                                    otherwise_delayed.clone(),
                                 )
                             };
 
-                            AirTree::clause(
-                                format!("__subject_span_{}_{}", location.start, location.end),
-                                AirTree::int(index),
-                                tipo.clone(),
-                                then,
-                                acc,
-                                false,
+                            // Special case here for future refactoring
+                            AirTree::anon_func(
+                                vec![],
+                                AirTree::assert_constr_index(
+                                    index,
+                                    AirTree::local_var(
+                                        format!(
+                                            "__subject_span_{}_{}",
+                                            location.start, location.end
+                                        ),
+                                        tipo.clone(),
+                                    ),
+                                    then,
+                                    acc,
+                                ),
+                                true,
                             )
                         },
                     );
 
                     let when_expr = AirTree::when(
                         format!("__subject_span_{}_{}", location.start, location.end),
-                        void(),
+                        Type::void(),
                         tipo.clone(),
                         AirTree::local_var(
                             format!("__constr_var_span_{}_{}", location.start, location.end),
                             tipo.clone(),
                         ),
-                        constr_clauses,
+                        AirTree::call(constr_clauses, Type::void(), vec![]),
                     );
 
                     let func_body = AirTree::let_assignment(
@@ -1874,15 +2095,13 @@ impl<'a> CodeGenerator<'a> {
                         }
                     }
 
-                    let code_gen_func = match self.tracing {
-                        TraceLevel::Silent => CodeGenFunction::Function {
-                            body: func_body,
-                            params: vec!["__param_0".to_string()],
-                        },
-                        TraceLevel::Compact | TraceLevel::Verbose => CodeGenFunction::Function {
-                            body: func_body,
-                            params: vec!["__param_0".to_string(), "__param_msg".to_string()],
-                        },
+                    let code_gen_func = CodeGenFunction::Function {
+                        body: func_body,
+                        params: vec![
+                            "__param_0".to_string(),
+                            "then_delayed".to_string(),
+                            "otherwise_delayed".to_string(),
+                        ],
                     };
 
                     self.code_gen_functions
@@ -1893,15 +2112,7 @@ impl<'a> CodeGenerator<'a> {
                     defined_data_types.insert(data_type_name.to_string(), 1);
                 }
 
-                let args = match self.tracing {
-                    TraceLevel::Silent => vec![value],
-                    TraceLevel::Compact | TraceLevel::Verbose => vec![
-                        value,
-                        msg_func
-                            .expect("should be unreachable: no msg func with tracing enabled.")
-                            .to_air_tree(),
-                    ],
-                };
+                let args = vec![value, AirTree::anon_func(vec![], then, true), otherwise];
 
                 let module_fn = ValueConstructorVariant::ModuleFn {
                     name: data_type_name.to_string(),
@@ -1918,7 +2129,7 @@ impl<'a> CodeGenerator<'a> {
                     "",
                 );
 
-                AirTree::call(func_var, void(), args)
+                AirTree::call(func_var, Type::void(), args)
             }
         }
     }
@@ -1938,28 +2149,7 @@ impl<'a> CodeGenerator<'a> {
         props.complex_clause = false;
 
         if let Some((clause, rest_clauses)) = clauses.split_first() {
-            let mut clause_then = self.build(&clause.then, module_name, &[]);
-
-            // handles clause guard if it exists
-            if let Some(guard) = &clause.guard {
-                props.complex_clause = true;
-
-                let clause_guard_name = format!(
-                    "__clause_guard_span_{}_{}",
-                    clause.location.start, clause.location.end
-                );
-
-                clause_then = AirTree::let_assignment(
-                    &clause_guard_name,
-                    builder::handle_clause_guard(guard),
-                    AirTree::clause_guard(
-                        &clause_guard_name,
-                        AirTree::bool(true),
-                        bool(),
-                        clause_then,
-                    ),
-                );
-            }
+            let clause_then = self.build(&clause.then, module_name, &[]);
 
             match &mut props.specific_clause {
                 // TODO: Implement PairClause and PairClauseGuard
@@ -1992,7 +2182,7 @@ impl<'a> CodeGenerator<'a> {
                             ),
                         )
                     } else if let Some(data_type) = data_type {
-                        if data_type.constructors.len() > 1 {
+                        if data_type.constructors.len() > 1 && !data_type.is_never() {
                             AirTree::clause(
                                 &props.original_subject_name,
                                 clause_cond,
@@ -2138,7 +2328,7 @@ impl<'a> CodeGenerator<'a> {
                         }
                     };
 
-                    let mut is_wild_card_elems_clause = clause.guard.is_none();
+                    let mut is_wild_card_elems_clause = true;
                     for element in elements.iter() {
                         is_wild_card_elems_clause = is_wild_card_elems_clause
                             && !pattern_has_conditions(element, &self.data_types);
@@ -2288,8 +2478,6 @@ impl<'a> CodeGenerator<'a> {
             // handle final_clause
             props.final_clause = true;
 
-            assert!(final_clause.guard.is_none());
-
             let clause_then = self.build(&final_clause.then, module_name, &[]);
 
             let (condition, assignments) =
@@ -2311,6 +2499,10 @@ impl<'a> CodeGenerator<'a> {
             Pattern::Int { value, .. } => {
                 assert!(!props.final_clause);
                 (AirTree::int(value), then)
+            }
+            Pattern::ByteArray { value, .. } => {
+                assert!(!props.final_clause);
+                (AirTree::byte_array(value.clone()), then)
             }
             Pattern::Var { name, .. } => (
                 AirTree::void(),
@@ -2459,9 +2651,9 @@ impl<'a> CodeGenerator<'a> {
                         // One special usage of list access here
                         // So for the msg we pass in empty string if tracing is on
                         // Since check_last_item is false this will never get added to the final uplc anyway
-                        None,
                         ExpectLevel::None,
                         elems_then,
+                        AirTree::error(Type::void(), false),
                     )
                 } else {
                     assert!(defined_tails.len() >= elems.len());
@@ -2540,9 +2732,9 @@ impl<'a> CodeGenerator<'a> {
                         name_index_assigns[1].0.clone(),
                         subject_tipo.clone(),
                         AirTree::local_var(props.clause_var_name.clone(), subject_tipo.clone()),
-                        None,
                         false,
                         next_then,
+                        AirTree::error(Type::void(), false),
                     )
                 };
 
@@ -2572,7 +2764,11 @@ impl<'a> CodeGenerator<'a> {
                         )
                     });
 
-                assert!(!data_type.constructors.is_empty());
+                assert!(
+                    !data_type.constructors.is_empty(),
+                    "{}\n{constructor:#?}\n{data_type:#?}",
+                    subject_tipo.to_pretty(0)
+                );
 
                 let (constr_index, _) = data_type
                     .constructors
@@ -2667,9 +2863,9 @@ impl<'a> CodeGenerator<'a> {
                     AirTree::fields_expose(
                         fields,
                         AirTree::local_var(props.clause_var_name.clone(), subject_tipo.clone()),
-                        None,
                         false,
                         next_then,
+                        AirTree::error(Type::void(), false),
                     )
                 };
 
@@ -2796,9 +2992,9 @@ impl<'a> CodeGenerator<'a> {
                             names,
                             subject_tipo.clone(),
                             AirTree::local_var(&props.clause_var_name, subject_tipo.clone()),
-                            None,
                             false,
                             tuple_name_assigns,
+                            AirTree::error(Type::void(), false),
                         ),
                     )
                 } else {
@@ -2826,7 +3022,16 @@ impl<'a> CodeGenerator<'a> {
                     AirTree::clause_guard(
                         &props.original_subject_name,
                         AirTree::int(value),
-                        int(),
+                        Type::int(),
+                        then,
+                    )
+                }
+                Pattern::ByteArray { value, .. } => {
+                    props.complex_clause = true;
+                    AirTree::clause_guard(
+                        &props.original_subject_name,
+                        AirTree::byte_array(value.clone()),
+                        Type::byte_array(),
                         then,
                     )
                 }
@@ -2951,14 +3156,14 @@ impl<'a> CodeGenerator<'a> {
                         AirTree::clause_guard(
                             &props.original_subject_name,
                             AirTree::bool(constr_name == "True"),
-                            bool(),
+                            Type::bool(),
                             then,
                         )
                     } else if subject_tipo.is_void() {
                         AirTree::clause_guard(
                             &props.original_subject_name,
                             AirTree::void(),
-                            void(),
+                            Type::void(),
                             then,
                         )
                     } else {
@@ -3020,7 +3225,7 @@ impl<'a> CodeGenerator<'a> {
                 itertools::Position::First(arg) if has_context => {
                     let arg_name = arg.arg_name.get_variable_name().unwrap_or("_").to_string();
 
-                    AirTree::anon_func(vec![arg_name], inner_then)
+                    AirTree::anon_func(vec![arg_name], inner_then, true)
                 }
                 itertools::Position::First(arg)
                 | itertools::Position::Middle(arg)
@@ -3030,36 +3235,35 @@ impl<'a> CodeGenerator<'a> {
 
                     arg_names.push(arg_name.clone());
 
-                    let param = AirTree::local_var(&arg_name, data());
+                    let param = AirTree::local_var(&arg_name, Type::data());
 
                     let actual_type = convert_opaque_type(&arg.tipo, &self.data_types, true);
 
-                    let msg_func = match self.tracing {
-                        TraceLevel::Silent => None,
-                        TraceLevel::Compact | TraceLevel::Verbose => {
-                            let msg = match self.tracing {
-                                TraceLevel::Silent => {
-                                    unreachable!("excluded from pattern guards")
-                                }
-                                TraceLevel::Compact => lines
-                                    .line_and_column_number(arg_span.start)
-                                    .expect("Out of bounds span")
-                                    .to_string(),
-                                TraceLevel::Verbose => src_code
-                                    .get(arg_span.start..arg_span.end)
-                                    .expect("Out of bounds span")
-                                    .to_string(),
-                            };
+                    let otherwise_delayed = {
+                        let msg = match self.tracing {
+                            TraceLevel::Silent => "".to_string(),
+                            TraceLevel::Compact => lines
+                                .line_and_column_number(arg_span.start)
+                                .expect("Out of bounds span")
+                                .to_string(),
+                            TraceLevel::Verbose => src_code
+                                .get(arg_span.start..arg_span.end)
+                                .expect("Out of bounds span")
+                                .to_string(),
+                        };
 
-                            let msg_func_name = msg.split_whitespace().join("");
+                        let msg_func_name = msg.split_whitespace().join("");
 
+                        if msg.is_empty() {
+                            None
+                        } else {
                             self.special_functions.insert_new_function(
-                                msg_func_name.to_string(),
-                                Term::string(msg),
-                                string(),
+                                msg_func_name.clone(),
+                                Term::Error.delayed_trace(Term::string(msg)).delay(),
+                                Type::void(),
                             );
 
-                            Some(self.special_functions.use_function_msg(msg_func_name))
+                            Some(self.special_functions.use_function_tree(msg_func_name))
                         }
                     };
 
@@ -3072,15 +3276,15 @@ impl<'a> CodeGenerator<'a> {
                         inner_then,
                         &actual_type,
                         AssignmentProperties {
-                            value_type: data(),
+                            value_type: Type::data(),
                             kind: AssignmentKind::expect(),
                             remove_unused: false,
                             full_check: true,
-                            msg_func,
+                            otherwise: otherwise_delayed,
                         },
                     );
 
-                    AirTree::anon_func(vec![arg_name], inner_then)
+                    AirTree::anon_func(vec![arg_name], inner_then, true)
                 }
                 itertools::Position::Only(_) => unreachable!(),
             })
@@ -3107,7 +3311,7 @@ impl<'a> CodeGenerator<'a> {
             &mut used_functions,
             &mut TreePath::new(),
             0,
-            0,
+            Fields::FirstField,
         );
 
         validator_hoistable = used_functions.clone();
@@ -3761,7 +3965,7 @@ impl<'a> CodeGenerator<'a> {
             current_function_deps,
             &mut function_tree_path,
             depth + 1,
-            0,
+            Fields::FirstField,
         );
 
         for (generic_function_key, variant_name) in current_function_deps.iter() {
@@ -3787,7 +3991,7 @@ impl<'a> CodeGenerator<'a> {
         dependency_functions: &mut Vec<(FunctionAccessKey, String)>,
         path: &mut TreePath,
         current_depth: usize,
-        depth_index: usize,
+        depth_index: Fields,
     ) {
         air_tree.traverse_tree_with_path(
             path,
@@ -3825,9 +4029,9 @@ impl<'a> CodeGenerator<'a> {
                             .get(&generic_function_key.function_name)
                             .unwrap_or_else(|| {
                                 panic!(
-                                    "Missing function definition for {}. Known definitions: {:?}",
+                                    "Missing function definition for {}. Known functions: {:?}",
                                     generic_function_key.function_name,
-                                    self.code_gen_functions.keys(),
+                                    self.functions.keys(),
                                 )
                             });
 
@@ -3850,7 +4054,7 @@ impl<'a> CodeGenerator<'a> {
 
                             let mut function_variant_path = IndexMap::new();
 
-                            let mut body = body.clone();
+                            let mut body = AirTree::no_op(body.clone());
 
                             body.traverse_tree_with(
                                 &mut |air_tree, _| {
@@ -3937,11 +4141,11 @@ impl<'a> CodeGenerator<'a> {
                                 })
                                 .collect_vec();
 
-                            let mut function_air_tree_body = self.build(
+                            let mut function_air_tree_body = AirTree::no_op(self.build(
                                 &function_def.body,
                                 &generic_function_key.module_name,
                                 &[],
-                            );
+                            ));
 
                             function_air_tree_body.traverse_tree_with(
                                 &mut |air_tree, _| {
@@ -3970,8 +4174,11 @@ impl<'a> CodeGenerator<'a> {
                             .map(|arg| arg.arg_name.get_variable_name().unwrap_or("_").to_string())
                             .collect_vec();
 
-                        let mut function_air_tree_body =
-                            self.build(&function_def.body, &generic_function_key.module_name, &[]);
+                        let mut function_air_tree_body = AirTree::no_op(self.build(
+                            &function_def.body,
+                            &generic_function_key.module_name,
+                            &[],
+                        ));
 
                         function_air_tree_body.traverse_tree_with(
                             &mut |air_tree, _| {
@@ -4017,27 +4224,6 @@ impl<'a> CodeGenerator<'a> {
     }
 
     fn gen_uplc(&mut self, ir: Air, arg_stack: &mut Vec<Term<Name>>) -> Option<Term<Name>> {
-        // Going to mark the changes made to code gen after air tree implementation
-        let error_term = match self.tracing {
-            TraceLevel::Silent => Term::Error,
-            TraceLevel::Compact | TraceLevel::Verbose => {
-                if air_holds_msg(&ir) {
-                    let msg = arg_stack.pop().unwrap();
-                    Term::Error.delayed_trace(msg)
-                } else {
-                    Term::Error
-                }
-            }
-        };
-
-        let convert_data_to_type = |term, tipo| {
-            if error_term == Term::Error {
-                builder::unknown_data_to_type(term, tipo)
-            } else {
-                builder::unknown_data_to_type_debug(term, tipo, error_term.clone())
-            }
-        };
-
         match ir {
             Air::Int { value } => Some(Term::integer(value.parse().unwrap())),
             Air::String { value } => Some(Term::string(value)),
@@ -4062,61 +4248,23 @@ impl<'a> CodeGenerator<'a> {
                 ValueConstructorVariant::ModuleConstant { .. } => {
                     unreachable!("{:#?}, {}", constructor, name)
                 }
-
-                ValueConstructorVariant::ModuleFn {
-                    builtin: Some(builtin),
-                    ..
-                } => {
-                    let term = match builtin {
-                        DefaultFunction::IfThenElse
-                        | DefaultFunction::ChooseUnit
-                        | DefaultFunction::Trace
-                        | DefaultFunction::ChooseList
-                        | DefaultFunction::ChooseData
-                        | DefaultFunction::UnConstrData => {
-                            builder::special_case_builtin(builtin, 0, vec![])
-                        }
-
-                        DefaultFunction::FstPair | DefaultFunction::SndPair => {
-                            builder::undata_builtin(
-                                builtin,
-                                0,
-                                &constructor.tipo.return_type().unwrap(),
-                                vec![],
-                            )
-                        }
-
-                        DefaultFunction::HeadList
-                            if !constructor.tipo.return_type().unwrap().is_pair() =>
-                        {
-                            builder::undata_builtin(
-                                builtin,
-                                0,
-                                &constructor.tipo.return_type().unwrap(),
-                                vec![],
-                            )
-                        }
-
-                        DefaultFunction::MkCons | DefaultFunction::MkPairData => {
-                            unimplemented!(
-                                "MkCons and MkPairData should be handled by an anon function or using [] or ( a, b, .., z) or Pair {{fst:a, snd: b}}.\n"
-                            )
-                        }
-                        _ => {
-                            let mut term: Term<Name> = (*builtin).into();
-
-                            term = builder::apply_builtin_forces(term, builtin.force_count());
-
-                            term
-                        }
-                    };
-                    Some(term)
-                }
                 ValueConstructorVariant::ModuleFn {
                     name: func_name,
                     module,
+                    builtin,
                     ..
                 } => {
+                    if let Some(func) = builtin {
+                        return self.gen_uplc(
+                            Air::Builtin {
+                                count: 0,
+                                func: *func,
+                                tipo: constructor.tipo,
+                            },
+                            arg_stack,
+                        );
+                    }
+
                     if let Some((names, index, cyclic_name)) = self.cyclic_functions.get(&(
                         FunctionAccessKey {
                             module_name: module.clone(),
@@ -4337,6 +4485,12 @@ impl<'a> CodeGenerator<'a> {
 
                 let mut term = arg_stack.pop().unwrap();
 
+                let otherwise = if matches!(expect_level, ExpectLevel::Full | ExpectLevel::Items) {
+                    arg_stack.pop().unwrap()
+                } else {
+                    Term::Error.delay()
+                };
+
                 let list_id = self.id_gen.next();
 
                 let mut id_list = vec![];
@@ -4362,7 +4516,7 @@ impl<'a> CodeGenerator<'a> {
                     term,
                     true,
                     expect_level,
-                    error_term,
+                    otherwise,
                 )
                 .apply(value);
 
@@ -4397,17 +4551,25 @@ impl<'a> CodeGenerator<'a> {
 
                 Some(term)
             }
-            Air::Fn { params } => {
+            Air::Fn {
+                params,
+                allow_inline,
+            } => {
                 let mut term = arg_stack.pop().unwrap();
 
                 for param in params.iter().rev() {
                     term = term.lambda(param);
                 }
+                term = if allow_inline {
+                    term
+                } else {
+                    term.lambda(NO_INLINE)
+                };
 
                 if params.is_empty() {
-                    Some(term.lambda(NO_INLINE).delay())
+                    Some(term.delay())
                 } else {
-                    Some(term.lambda(NO_INLINE))
+                    Some(term)
                 }
             }
             Air::Call { count, .. } => {
@@ -4425,61 +4587,62 @@ impl<'a> CodeGenerator<'a> {
 
                     // How we handle zero arg anon functions has changed
                     // We now delay zero arg anon functions and force them on a call operation
-                    if let Term::Var(name) = &term {
-                        let zero_arg_functions = self.zero_arg_functions.clone();
-                        let text = &name.text;
+                    match term.pierce_no_inlines() {
+                        Term::Var(name) => {
+                            let zero_arg_functions = self.zero_arg_functions.clone();
+                            let text = &name.text;
 
-                        if let Some((_, air_vec)) = zero_arg_functions.iter().find(
-                            |(
-                                (
-                                    FunctionAccessKey {
-                                        module_name,
-                                        function_name,
-                                    },
-                                    variant,
-                                ),
-                                _,
-                            )| {
-                                let name_module = format!("{module_name}_{function_name}{variant}");
-                                let name = format!("{function_name}{variant}");
+                            if let Some((_, air_vec)) = zero_arg_functions.iter().find(
+                                |(
+                                    (
+                                        FunctionAccessKey {
+                                            module_name,
+                                            function_name,
+                                        },
+                                        variant,
+                                    ),
+                                    _,
+                                )| {
+                                    let name_module =
+                                        format!("{module_name}_{function_name}{variant}");
+                                    let name = format!("{function_name}{variant}");
 
-                                text == &name || text == &name_module
-                            },
-                        ) {
-                            let mut term = self.uplc_code_gen(air_vec.clone());
+                                    text == &name || text == &name_module
+                                },
+                            ) {
+                                let mut term = self.uplc_code_gen(air_vec.clone());
 
-                            term = term.constr_fields_exposer().constr_index_exposer();
+                                term = term.constr_fields_exposer().constr_index_exposer();
 
-                            let mut program: Program<Name> = Program {
-                                version: (1, 0, 0),
-                                term: self.special_functions.apply_used_functions(term),
-                            };
+                                let mut program: Program<Name> = Program {
+                                    version: (1, 0, 0),
+                                    term: self.special_functions.apply_used_functions(term),
+                                };
 
-                            let mut interner = CodeGenInterner::new();
+                                let mut interner = CodeGenInterner::new();
 
-                            interner.program(&mut program);
+                                interner.program(&mut program);
 
-                            let eval_program: Program<NamedDeBruijn> =
-                                program.remove_no_inlines().try_into().unwrap();
+                                let eval_program: Program<NamedDeBruijn> =
+                                    program.remove_no_inlines().try_into().unwrap();
 
-                            let result = eval_program.eval(ExBudget::max()).result();
+                                let result = eval_program.eval(ExBudget::max()).result();
 
-                            let evaluated_term: Term<NamedDeBruijn> = result.unwrap_or_else(|e| {
-                                panic!("Evaluated a zero argument function and received this error: {e:#?}")
-                            });
+                                let evaluated_term: Term<NamedDeBruijn> = result.unwrap_or_else(|e| {
+                                    panic!("Evaluated a zero argument function and received this error: {e:#?}")
+                                });
 
-                            Some(evaluated_term.try_into().unwrap())
-                        } else {
-                            Some(term.force())
+                                Some(evaluated_term.try_into().unwrap())
+                            } else {
+                                Some(term.force())
+                            }
                         }
-                    } else if let Term::Apply { .. } = &term {
-                        // Case for mutually recursive zero arg functions
-                        Some(term.force())
-                    } else {
-                        unreachable!(
-                            "Shouldn't call anything other than var or apply {:#?}",
+                        Term::Delay(inner_term) => Some(inner_term.as_ref().clone()),
+                        Term::Apply { .. } => Some(term.force()),
+                        _ => unreachable!(
+                            "Shouldn't call anything other than var or apply\n{:#?}",
                             term
-                        )
+                        ),
                     }
                 }
             }
@@ -4501,30 +4664,27 @@ impl<'a> CodeGenerator<'a> {
                     | DefaultFunction::Trace
                     | DefaultFunction::ChooseList
                     | DefaultFunction::ChooseData
+                    | DefaultFunction::MkCons
                     | DefaultFunction::UnConstrData => {
-                        builder::special_case_builtin(&func, count, arg_vec)
+                        builder::special_case_builtin(&func, tipo, count, arg_vec)
                     }
-
                     DefaultFunction::FstPair | DefaultFunction::SndPair => {
                         builder::undata_builtin(&func, count, ret_tipo, arg_vec)
                     }
-
                     DefaultFunction::HeadList if !tipo.is_pair() => {
                         builder::undata_builtin(&func, count, ret_tipo, arg_vec)
-                    }
-
-                    DefaultFunction::MkCons | DefaultFunction::MkPairData => {
-                        unimplemented!(
-                            "MkCons and MkPairData should be handled by an anon function or using [] or ( a, b, .., z).\n"
-                        )
                     }
                     _ => {
                         let mut term: Term<Name> = func.into();
 
                         term = builder::apply_builtin_forces(term, func.force_count());
 
-                        for arg in arg_vec {
-                            term = term.apply(arg.clone());
+                        if func.arg_is_unit() {
+                            term = term.apply(Term::unit())
+                        } else {
+                            for arg in arg_vec {
+                                term = term.apply(arg.clone());
+                            }
                         }
 
                         term
@@ -4772,12 +4932,16 @@ impl<'a> CodeGenerator<'a> {
 
                 Some(term)
             }
-            Air::CastFromData { tipo, .. } => {
+            Air::CastFromData { tipo, full_cast } => {
                 let mut term = arg_stack.pop().unwrap();
 
-                term = convert_data_to_type(term, &tipo);
+                term = if full_cast {
+                    unknown_data_to_type(term, &tipo)
+                } else {
+                    known_data_to_type(term, &tipo)
+                };
 
-                if extract_constant(&term).is_some() {
+                if extract_constant(term.pierce_no_inlines()).is_some() {
                     let mut program: Program<Name> = Program {
                         version: (1, 0, 0),
                         term,
@@ -4803,7 +4967,7 @@ impl<'a> CodeGenerator<'a> {
             Air::CastToData { tipo } => {
                 let mut term = arg_stack.pop().unwrap();
 
-                if extract_constant(&term).is_some() {
+                if extract_constant(term.pierce_no_inlines()).is_some() {
                     term = builder::convert_type_to_data(term, &tipo);
 
                     let mut program: Program<Name> = Program {
@@ -4834,17 +4998,13 @@ impl<'a> CodeGenerator<'a> {
                 let constr = arg_stack.pop().unwrap();
 
                 let mut term = arg_stack.pop().unwrap();
+                let otherwise = arg_stack.pop().unwrap();
 
                 term = Term::equals_integer()
                     .apply(Term::integer(constr_index.into()))
-                    .apply(
-                        Term::var(
-                            self.special_functions
-                                .use_function_uplc(CONSTR_INDEX_EXPOSER.to_string()),
-                        )
-                        .apply(constr),
-                    )
-                    .delayed_if_then_else(term, error_term);
+                    .apply(constr)
+                    .if_then_else(term.delay(), otherwise)
+                    .force();
 
                 Some(term)
             }
@@ -4852,11 +5012,12 @@ impl<'a> CodeGenerator<'a> {
                 let value = arg_stack.pop().unwrap();
 
                 let mut term = arg_stack.pop().unwrap();
+                let otherwise = arg_stack.pop().unwrap();
 
                 if is_true {
-                    term = value.delayed_if_then_else(term, error_term)
+                    term = value.if_then_else(term.delay(), otherwise).force()
                 } else {
-                    term = value.delayed_if_then_else(error_term, term)
+                    term = value.if_then_else(otherwise, term.delay()).force()
                 }
                 Some(term)
             }
@@ -5255,7 +5416,7 @@ impl<'a> CodeGenerator<'a> {
                     .apply(term);
 
                 if arg_vec.iter().all(|item| {
-                    let maybe_const = extract_constant(item);
+                    let maybe_const = extract_constant(item.pierce_no_inlines());
                     maybe_const.is_some()
                 }) {
                     let mut program: Program<Name> = Program {
@@ -5286,6 +5447,13 @@ impl<'a> CodeGenerator<'a> {
                 let value = arg_stack.pop().unwrap();
 
                 let mut term = arg_stack.pop().unwrap();
+
+                let otherwise = if is_expect {
+                    arg_stack.pop().unwrap()
+                } else {
+                    Term::Error.delay()
+                };
+
                 let list_id = self.id_gen.next();
 
                 id_list.push(list_id);
@@ -5313,7 +5481,7 @@ impl<'a> CodeGenerator<'a> {
                         term,
                         false,
                         is_expect.into(),
-                        error_term,
+                        otherwise,
                     );
 
                     term = term.apply(
@@ -5333,13 +5501,15 @@ impl<'a> CodeGenerator<'a> {
                 let value = arg_stack.pop().unwrap();
 
                 let mut term = arg_stack.pop().unwrap();
+                let otherwise = arg_stack.pop().unwrap();
 
                 term = Term::var(
                     self.special_functions
                         .use_function_uplc(CONSTR_FIELDS_EXPOSER.to_string()),
                 )
                 .apply(value)
-                .delayed_choose_list(term, error_term);
+                .choose_list(term.delay(), otherwise)
+                .force();
 
                 Some(term)
             }
@@ -5347,8 +5517,9 @@ impl<'a> CodeGenerator<'a> {
                 let value = arg_stack.pop().unwrap();
 
                 let mut term = arg_stack.pop().unwrap();
+                let otherwise = arg_stack.pop().unwrap();
 
-                term = value.delayed_choose_list(term, error_term);
+                term = value.choose_list(term.delay(), otherwise).force();
 
                 Some(term)
             }
@@ -5426,8 +5597,18 @@ impl<'a> CodeGenerator<'a> {
             } => {
                 let tail_name_prefix = "__tail_index";
 
-                let data_type = lookup_data_type_by_tipo(&self.data_types, &tipo)
-                    .unwrap_or_else(|| panic!("HOW DID YOU DO THIS ON BOOL OR VOID"));
+                let data_type =
+                    lookup_data_type_by_tipo(&self.data_types, &tipo).unwrap_or_else(|| {
+                        panic!(
+                            "Attempted record update on an unknown type!\ntype: {:#?}",
+                            tipo
+                        )
+                    });
+
+                assert!(
+                    !data_type.is_never(),
+                    "Attempted record update on a Never type.",
+                );
 
                 let constructor_field_count = data_type.constructors[0].arguments.len();
                 let record = arg_stack.pop().unwrap();
@@ -5545,6 +5726,11 @@ impl<'a> CodeGenerator<'a> {
                 let value = arg_stack.pop().unwrap();
 
                 let mut term = arg_stack.pop().unwrap();
+                let otherwise = if is_expect {
+                    arg_stack.pop().unwrap()
+                } else {
+                    Term::Error.delay()
+                };
                 let list_id = self.id_gen.next();
 
                 let mut id_list = vec![];
@@ -5567,7 +5753,7 @@ impl<'a> CodeGenerator<'a> {
                     term,
                     false,
                     is_expect.into(),
-                    error_term,
+                    otherwise,
                 )
                 .apply(value);
 
@@ -5583,34 +5769,54 @@ impl<'a> CodeGenerator<'a> {
                 let value = arg_stack.pop().unwrap();
 
                 let mut term = arg_stack.pop().unwrap();
+                let otherwise = if is_expect {
+                    arg_stack.pop().unwrap()
+                } else {
+                    Term::Error.delay()
+                };
+
                 let list_id = self.id_gen.next();
 
                 if let Some(name) = snd {
-                    term = term.lambda(name).apply(if is_expect {
-                        convert_data_to_type(
-                            Term::snd_pair().apply(Term::var(format!("__pair_{list_id}"))),
-                            &inner_types[1],
-                        )
+                    let value = Term::snd_pair().apply(Term::var(format!("__pair_{list_id}")));
+                    term = if is_expect {
+                        if otherwise == Term::Error.delay() {
+                            term.lambda(name)
+                                .apply(unknown_data_to_type(value, &inner_types[1]))
+                        } else {
+                            softcast_data_to_type_otherwise(
+                                value,
+                                &name,
+                                &inner_types[1],
+                                term,
+                                otherwise.clone(),
+                            )
+                        }
                     } else {
-                        known_data_to_type(
-                            Term::snd_pair().apply(Term::var(format!("__pair_{list_id}"))),
-                            &inner_types[1],
-                        )
-                    });
+                        term.lambda(name)
+                            .apply(known_data_to_type(value, &inner_types[1]))
+                    }
                 }
 
                 if let Some(name) = fst {
-                    term = term.lambda(name).apply(if is_expect {
-                        convert_data_to_type(
-                            Term::fst_pair().apply(Term::var(format!("__pair_{list_id}"))),
-                            &inner_types[0],
-                        )
+                    let value = Term::fst_pair().apply(Term::var(format!("__pair_{list_id}")));
+                    term = if is_expect {
+                        if otherwise == Term::Error.delay() {
+                            term.lambda(name)
+                                .apply(unknown_data_to_type(value, &inner_types[0]))
+                        } else {
+                            softcast_data_to_type_otherwise(
+                                value,
+                                &name,
+                                &inner_types[0],
+                                term,
+                                otherwise,
+                            )
+                        }
                     } else {
-                        known_data_to_type(
-                            Term::fst_pair().apply(Term::var(format!("__pair_{list_id}"))),
-                            &inner_types[0],
-                        )
-                    })
+                        term.lambda(name)
+                            .apply(known_data_to_type(value, &inner_types[0]))
+                    }
                 }
 
                 term = term.lambda(format!("__pair_{list_id}")).apply(value);
@@ -5635,6 +5841,37 @@ impl<'a> CodeGenerator<'a> {
             }
 
             Air::NoOp => None,
+            Air::MultiValidator {
+                two_arg_name,
+                three_arg_name,
+            } => {
+                let two_arg = arg_stack.pop().unwrap();
+
+                let three_arg = arg_stack.pop().unwrap();
+
+                let term = wrap_as_multi_validator(
+                    three_arg,
+                    two_arg,
+                    self.tracing,
+                    three_arg_name,
+                    two_arg_name,
+                );
+
+                Some(term)
+            }
+            Air::SoftCastLet { name, tipo } => {
+                let value = arg_stack.pop().unwrap();
+                let then = arg_stack.pop().unwrap();
+                let otherwise = arg_stack.pop().unwrap();
+
+                if otherwise == Term::Error.delay() {
+                    Some(then.lambda(name).apply(unknown_data_to_type(value, &tipo)))
+                } else {
+                    Some(softcast_data_to_type_otherwise(
+                        value, &name, &tipo, then, otherwise,
+                    ))
+                }
+            }
         }
     }
 }

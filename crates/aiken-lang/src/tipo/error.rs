@@ -2,12 +2,13 @@ use super::Type;
 use crate::{
     ast::{Annotation, BinOp, CallArg, LogicalOpChainKind, Span, UntypedFunction, UntypedPattern},
     error::ExtraData,
-    expr::{self, UntypedExpr},
+    expr::{self, AssignmentPattern, UntypedAssignmentKind, UntypedExpr},
     format::Formatter,
     levenshtein,
     pretty::Documentable,
 };
 use indoc::formatdoc;
+use itertools::Itertools;
 use miette::{Diagnostic, LabeledSpan};
 use ordinal::Ordinal;
 use owo_colors::{
@@ -15,13 +16,7 @@ use owo_colors::{
     Stream::{Stderr, Stdout},
 };
 use std::{collections::HashMap, fmt::Display, rc::Rc};
-
-#[derive(Debug, thiserror::Error, Diagnostic, Clone)]
-#[error("Something is possibly wrong here...")]
-pub struct Snippet {
-    #[label]
-    pub location: Span,
-}
+use vec1::Vec1;
 
 #[derive(Debug, Clone, thiserror::Error)]
 #[error(
@@ -100,8 +95,8 @@ pub enum Error {
     #[diagnostic(url("https://aiken-lang.org/language-tour/custom-types#type-aliases"))]
     #[diagnostic(code("cycle"))]
     CyclicTypeDefinitions {
-        #[related]
-        errors: Vec<Snippet>,
+        #[label(collection, "part of a cycle")]
+        cycle: Vec<Span>,
     },
 
     #[error(
@@ -477,6 +472,8 @@ If you really meant to return that last expression, try to replace it with the f
         #[label("let-binding as last expression")]
         location: Span,
         expr: expr::UntypedExpr,
+        patterns: Vec1<AssignmentPattern>,
+        kind: UntypedAssignmentKind,
     },
 
     #[error(
@@ -491,17 +488,6 @@ If you really meant to return that last expression, try to replace it with the f
         #[label]
         location: Span,
         name: String,
-    },
-
-    #[error("I found a multi-validator where both take the same number of arguments.\n")]
-    #[diagnostic(code("illegal::multi_validator"))]
-    #[diagnostic(help("Multi-validators cannot take the same number of arguments. One must take 3 arguments\nand the other must take 2 arguments. Both of these take {} arguments.", count.to_string().purple()))]
-    MultiValidatorEqualArgs {
-        #[label("{} here", count)]
-        location: Span,
-        #[label("and {} here", count)]
-        other_location: Span,
-        count: usize,
     },
 
     #[error(
@@ -768,13 +754,39 @@ Perhaps, try the following:
     #[diagnostic(code("unknown::module"))]
     #[diagnostic(help(
         "{}",
-        suggest_neighbor(name, imported_modules.iter(), "Did you forget to add a package as dependency?")
+        suggest_neighbor(name, known_modules.iter(), "Did you forget to add a package as dependency?")
     ))]
     UnknownModule {
         #[label]
         location: Span,
         name: String,
-        imported_modules: Vec<String>,
+        known_modules: Vec<String>,
+    },
+
+    #[error(
+        "I couldn't find any module for the environment: '{}'\n",
+        name.if_supports_color(Stdout, |s| s.purple())
+    )]
+    #[diagnostic(code("unknown::environment"))]
+    #[diagnostic(help(
+        "{}{}",
+        if known_environments.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "I know about the following environments:\n{}\n\n",
+                known_environments
+                    .iter()
+                    .map(|s| format!("─▶ {}", s.if_supports_color(Stdout, |s| s.purple())))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            )
+        },
+        suggest_neighbor(name, known_environments.iter(), "Did you forget to define this environment?")
+    ))]
+    UnknownEnvironment {
+        name: String,
+        known_environments: Vec<String>,
     },
 
     #[error(
@@ -829,11 +841,23 @@ Perhaps, try the following:
     #[diagnostic(code("unknown::module_value"))]
     #[diagnostic(help(
         "{}",
-        suggest_neighbor(
-            name,
-            value_constructors.iter(),
-            &suggest_make_public()
-        )
+        if ["mk_nil_data", "mk_pair_data", "mk_nil_pair_data"].contains(&.name.as_str()) {
+            format!(
+                "It seems like you're looking for a builtin function that has been (recently) renamed. Sorry about that, but take notes of the new names of the following functions:\n\n{:<16} -> {}\n{:<16} -> {}\n{:<16} -> {}",
+                "mk_nil_data".if_supports_color(Stderr, |s| s.red()),
+                "new_list".if_supports_color(Stderr, |s| s.green()),
+                "mk_pair_data".if_supports_color(Stderr, |s| s.red()),
+                "new_pair".if_supports_color(Stderr, |s| s.green()),
+                "mk_nil_pair_data".if_supports_color(Stderr, |s| s.red()),
+                "new_pairs".if_supports_color(Stderr, |s| s.green()),
+            )
+        } else {
+            suggest_neighbor(
+                name,
+                value_constructors.iter(),
+                &suggest_make_public()
+            )
+        }
     ))]
     UnknownModuleValue {
         #[label]
@@ -1004,18 +1028,31 @@ The best thing to do from here is to remove it."#))]
     ))]
     IncorrectValidatorArity {
         count: u32,
-        #[label("{} arguments", if *count < 2 { "not enough" } else { "too many" })]
+        expected: u32,
+        #[label("{} arguments", if count < expected { "not enough" } else { "too many" })]
         location: Span,
     },
 
     #[error("I caught a test with too many arguments.\n")]
-    #[diagnostic(code("illegal::test_arity"))]
+    #[diagnostic(code("illegal::test::arity"))]
     #[diagnostic(help(
         "Tests are allowed to have 0 or 1 argument, but no more. Here I've found a test definition with {count} arguments. If you need to provide multiple values to a test, use a Record or a Tuple.",
     ))]
     IncorrectTestArity {
         count: usize,
         #[label("too many arguments")]
+        location: Span,
+    },
+
+    #[error("I caught a test with an illegal return type.\n")]
+    #[diagnostic(code("illegal::test::return"))]
+    #[diagnostic(help(
+        "Tests must return either {Bool} or {Void}. Note that `expect` assignment are implicitly typed {Void} (and thus, may be the last expression of a test).",
+        Bool = "Bool".if_supports_color(Stderr, |s| s.cyan()),
+        Void = "Void".if_supports_color(Stderr, |s| s.cyan()),
+    ))]
+    IllegalTestType {
+        #[label("expected Bool or Void")]
         location: Span,
     },
 
@@ -1033,6 +1070,46 @@ The best thing to do from here is to remove it."#))]
     MustInferFirst {
         function: UntypedFunction,
         location: Span,
+    },
+
+    #[error("I found a validator handler referring to an unknown purpose.\n")]
+    #[diagnostic(code("unknown::purpose"))]
+    #[diagnostic(help(
+        "Handler must be named after a known purpose. Here is a list of available purposes:\n{}",
+        available_purposes
+          .iter()
+          .map(|p| format!("-> {}", p.if_supports_color(Stdout, |s| s.green())))
+          .join("\n")
+    ))]
+    UnknownPurpose {
+        #[label("unknown purpose")]
+        location: Span,
+        available_purposes: Vec<String>,
+    },
+
+    #[error("I could not find an appropriate handler in the validator definition\n")]
+    #[diagnostic(code("unknown::handler"))]
+    #[diagnostic(help(
+        "When referring to a validator handler via record access, you must refer to one of the declared handlers:\n{}",
+        available_handlers
+          .iter()
+          .map(|p| format!("-> {}", p.if_supports_color(Stdout, |s| s.green())))
+          .join("\n")
+    ))]
+    UnknownValidatorHandler {
+        #[label("unknown validator handler")]
+        location: Span,
+        available_handlers: Vec<String>,
+    },
+
+    #[error("I caught an extraneous fallback handler in an already exhaustive validator\n")]
+    #[diagnostic(code("extraneous::fallback"))]
+    #[diagnostic(help(
+        "Validator handlers must be exhaustive and either cover all purposes, or provide a fallback handler. Here, you have successfully covered all script purposes with your handler, but left an extraneous fallback branch. I cannot let that happen, but removing it for you would probably be deemed rude. So please, remove the fallback."
+    ))]
+    UnexpectedValidatorFallback {
+        #[label("redundant fallback handler")]
+        fallback: Span,
     },
 }
 
@@ -1064,7 +1141,6 @@ impl ExtraData for Error {
             | Error::LastExpressionIsAssignment { .. }
             | Error::LogicalOpChainMissingExpr { .. }
             | Error::MissingVarInAlternativePattern { .. }
-            | Error::MultiValidatorEqualArgs { .. }
             | Error::NonLocalClauseGuardVariable { .. }
             | Error::NotIndexable { .. }
             | Error::NotExhaustivePatternMatch { .. }
@@ -1084,14 +1160,19 @@ impl ExtraData for Error {
             | Error::UnknownModuleType { .. }
             | Error::UnknownModuleValue { .. }
             | Error::UnknownRecordField { .. }
+            | Error::UnknownEnvironment { .. }
             | Error::UnnecessarySpreadOperator { .. }
             | Error::UpdateMultiConstructorType { .. }
             | Error::ValidatorImported { .. }
             | Error::IncorrectTestArity { .. }
+            | Error::IllegalTestType { .. }
             | Error::GenericLeftAtBoundary { .. }
             | Error::UnexpectedMultiPatternAssignment { .. }
             | Error::ExpectOnOpaqueType { .. }
             | Error::ValidatorMustReturnBool { .. }
+            | Error::UnknownPurpose { .. }
+            | Error::UnknownValidatorHandler { .. }
+            | Error::UnexpectedValidatorFallback { .. }
             | Error::MustInferFirst { .. } => None,
 
             Error::UnknownType { name, .. }
@@ -1672,6 +1753,26 @@ pub enum Warning {
     },
 
     #[error(
+        "I found an {} {}",
+        "if/is".if_supports_color(Stderr, |s| s.purple()),
+        "that checks an expression with a known type.".if_supports_color(Stderr, |s| s.yellow())
+    )]
+    #[diagnostic(
+        code("if_is_on_non_data"),
+        help(
+            "Prefer using a {} to match on all known constructors.",
+            "when/is".if_supports_color(Stderr, |s| s.purple())
+        )
+    )]
+    UseWhenInstead {
+        #[label(
+            "use {}",
+            "when/is".if_supports_color(Stderr, |s| s.purple())
+        )]
+        location: Span,
+    },
+
+    #[error(
         "I came across a discarded variable in a let assignment: {}",
         name.if_supports_color(Stderr, |s| s.default_color())
     )]
@@ -1755,7 +1856,8 @@ impl ExtraData for Warning {
             | Warning::UnusedType { .. }
             | Warning::UnusedVariable { .. }
             | Warning::DiscardedLetAssignment { .. }
-            | Warning::ValidatorInLibraryModule { .. } => None,
+            | Warning::ValidatorInLibraryModule { .. }
+            | Warning::UseWhenInstead { .. } => None,
             Warning::Utf8ByteArrayIsValidHexString { value, .. } => Some(value.clone()),
             Warning::UnusedImportedModule { location, .. } => {
                 Some(format!("{},{}", false, location.start))
@@ -1790,7 +1892,7 @@ pub enum UnknownRecordFieldSituation {
     FunctionCall,
 }
 
-fn format_suggestion(sample: &UntypedExpr) -> String {
+pub fn format_suggestion(sample: &UntypedExpr) -> String {
     Formatter::new()
         .expr(sample, false)
         .to_pretty_string(70)

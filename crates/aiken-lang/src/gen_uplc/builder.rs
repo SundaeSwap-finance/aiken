@@ -1,14 +1,12 @@
 use super::{
-    air::{Air, ExpectLevel},
+    air::ExpectLevel,
     tree::{AirMsg, AirTree, TreePath},
 };
 use crate::{
     ast::{
-        BinOp, ClauseGuard, Constant, DataTypeKey, FunctionAccessKey, Pattern, Span, TraceLevel,
-        TypedArg, TypedAssignmentKind, TypedClause, TypedClauseGuard, TypedDataType, TypedPattern,
-        UnOp,
+        Constant, DataTypeKey, FunctionAccessKey, Pattern, Span, TraceLevel, TypedArg,
+        TypedAssignmentKind, TypedClause, TypedDataType, TypedPattern,
     },
-    builtins::{bool, data, function, int, list, void},
     expr::TypedExpr,
     line_numbers::{LineColumn, LineNumbers},
     tipo::{
@@ -71,7 +69,7 @@ pub struct AssignmentProperties {
     pub kind: TypedAssignmentKind,
     pub remove_unused: bool,
     pub full_check: bool,
-    pub msg_func: Option<AirMsg>,
+    pub otherwise: Option<AirTree>,
 }
 
 #[derive(Clone, Debug)]
@@ -213,7 +211,7 @@ impl CodeGenSpecialFuncs {
                 Term::snd_pair()
                     .apply(Term::unconstr_data().apply(Term::var("__constr_var")))
                     .lambda("__constr_var"),
-                function(vec![data()], list(data())),
+                Type::function(vec![Type::data()], Type::list(Type::data())),
             ),
         );
 
@@ -223,7 +221,7 @@ impl CodeGenSpecialFuncs {
                 Term::fst_pair()
                     .apply(Term::unconstr_data().apply(Term::var("__constr_var")))
                     .lambda("__constr_var"),
-                function(vec![data()], int()),
+                Type::function(vec![Type::data()], Type::int()),
             ),
         );
 
@@ -298,66 +296,6 @@ pub fn constants_ir(literal: &Constant) -> AirTree {
     }
 }
 
-pub fn handle_clause_guard(clause_guard: &TypedClauseGuard) -> AirTree {
-    match clause_guard {
-        ClauseGuard::Not { value, .. } => {
-            let val = handle_clause_guard(value);
-
-            AirTree::unop(UnOp::Not, val)
-        }
-        ClauseGuard::Equals { left, right, .. } => {
-            let left_child = handle_clause_guard(left);
-            let right_child = handle_clause_guard(right);
-
-            AirTree::binop(BinOp::Eq, bool(), left_child, right_child, left.tipo())
-        }
-        ClauseGuard::NotEquals { left, right, .. } => {
-            let left_child = handle_clause_guard(left);
-            let right_child = handle_clause_guard(right);
-
-            AirTree::binop(BinOp::NotEq, bool(), left_child, right_child, left.tipo())
-        }
-        ClauseGuard::GtInt { left, right, .. } => {
-            let left_child = handle_clause_guard(left);
-            let right_child = handle_clause_guard(right);
-
-            AirTree::binop(BinOp::GtInt, bool(), left_child, right_child, left.tipo())
-        }
-        ClauseGuard::GtEqInt { left, right, .. } => {
-            let left_child = handle_clause_guard(left);
-            let right_child = handle_clause_guard(right);
-
-            AirTree::binop(BinOp::GtEqInt, bool(), left_child, right_child, left.tipo())
-        }
-        ClauseGuard::LtInt { left, right, .. } => {
-            let left_child = handle_clause_guard(left);
-            let right_child = handle_clause_guard(right);
-
-            AirTree::binop(BinOp::LtInt, bool(), left_child, right_child, left.tipo())
-        }
-        ClauseGuard::LtEqInt { left, right, .. } => {
-            let left_child = handle_clause_guard(left);
-            let right_child = handle_clause_guard(right);
-
-            AirTree::binop(BinOp::LtEqInt, bool(), left_child, right_child, left.tipo())
-        }
-        ClauseGuard::Or { left, right, .. } => {
-            let left_child = handle_clause_guard(left);
-            let right_child = handle_clause_guard(right);
-
-            AirTree::binop(BinOp::Or, bool(), left_child, right_child, left.tipo())
-        }
-        ClauseGuard::And { left, right, .. } => {
-            let left_child = handle_clause_guard(left);
-            let right_child = handle_clause_guard(right);
-
-            AirTree::binop(BinOp::And, bool(), left_child, right_child, left.tipo())
-        }
-        ClauseGuard::Var { tipo, name, .. } => AirTree::local_var(name, tipo.clone()),
-        ClauseGuard::Constant(constant) => constants_ir(constant),
-    }
-}
-
 pub fn get_generic_variant_name(t: &Rc<Type>) -> String {
     let uplc_type = t.get_uplc_type();
 
@@ -415,9 +353,27 @@ pub fn erase_opaque_type_operations(
 pub fn find_introduced_variables(air_tree: &AirTree) -> Vec<String> {
     match air_tree {
         AirTree::Let { name, .. } => vec![name.clone()],
+        AirTree::SoftCastLet { name, .. } => vec![name.clone()],
         AirTree::TupleGuard { indices, .. } | AirTree::TupleClause { indices, .. } => {
             indices.iter().map(|(_, name)| name.clone()).collect()
         }
+        AirTree::PairGuard {
+            fst_name, snd_name, ..
+        } => fst_name
+            .iter()
+            .cloned()
+            .chain(snd_name.iter().cloned())
+            .collect_vec(),
+        AirTree::PairAccessor { fst, snd, .. } => {
+            fst.iter().cloned().chain(snd.iter().cloned()).collect_vec()
+        }
+        AirTree::PairClause {
+            fst_name, snd_name, ..
+        } => fst_name
+            .iter()
+            .cloned()
+            .chain(snd_name.iter().cloned())
+            .collect_vec(),
         AirTree::Fn { params, .. } => params.to_vec(),
         AirTree::ListAccessor { names, .. } => names.clone(),
         AirTree::ListExpose {
@@ -476,11 +432,13 @@ pub fn identify_recursive_static_params(
     air_tree: &mut AirTree,
     tree_path: &TreePath,
     func_params: &[String],
-    func_key: &FunctionAccessKey,
-    variant: &String,
+    func_key: &(FunctionAccessKey, String),
+    function_calls_and_usage: &mut (usize, usize),
     shadowed_parameters: &mut HashMap<String, TreePath>,
     potential_recursive_statics: &mut Vec<String>,
 ) {
+    let variant = &func_key.1;
+    let func_key = &func_key.0;
     // Find whether any of the potential recursive statics get shadowed (because even if we pass in the same referenced name, it might not be static)
     for introduced_variable in find_introduced_variables(air_tree) {
         if potential_recursive_statics.contains(&introduced_variable) {
@@ -517,6 +475,26 @@ pub fn identify_recursive_static_params(
                 }
             }
         }
+        // This is a function call of a recursive function so track that
+        *function_calls_and_usage = (function_calls_and_usage.0 + 1, function_calls_and_usage.1);
+    } else if let AirTree::Var {
+        constructor:
+            ValueConstructor {
+                variant: ValueConstructorVariant::ModuleFn { name, module, .. },
+                ..
+            },
+        variant_name,
+        ..
+    } = air_tree
+    {
+        if name == &func_key.function_name
+            && module == &func_key.module_name
+            && variant == variant_name
+        {
+            // This is a usage of the recursive function either by call or being passed to a function or returned
+            *function_calls_and_usage =
+                (function_calls_and_usage.0, function_calls_and_usage.1 + 1);
+        }
     }
 }
 
@@ -531,14 +509,15 @@ pub fn modify_self_calls(
     // TODO: this would be a lot simpler if each `Var`, `Let`, function argument, etc. had a unique identifier
     // rather than just a name; this would let us track if the Var passed to itself was the same value as the method argument
     let mut shadowed_parameters: HashMap<String, TreePath> = HashMap::new();
+    let mut calls_and_var_usage = (0, 0);
     body.traverse_tree_with(
         &mut |air_tree: &mut AirTree, tree_path| {
             identify_recursive_static_params(
                 air_tree,
                 tree_path,
                 func_params,
-                func_key,
-                variant,
+                &(func_key.clone(), variant.clone()),
+                &mut calls_and_var_usage,
                 &mut shadowed_parameters,
                 &mut potential_recursive_statics,
             );
@@ -558,42 +537,79 @@ pub fn modify_self_calls(
     // Modify any self calls to remove recursive static parameters and append `self` as a parameter for the recursion
     body.traverse_tree_with(
         &mut |air_tree: &mut AirTree, _| {
-            if let AirTree::Call { func, args, .. } = air_tree {
-                if let AirTree::Var {
-                    constructor:
-                        ValueConstructor {
-                            variant: ValueConstructorVariant::ModuleFn { name, module, .. },
-                            ..
-                        },
-                    variant_name,
-                    ..
-                } = func.as_ref()
-                {
-                    if name == &func_key.function_name
-                        && module == &func_key.module_name
-                        && variant == variant_name
+            if let AirTree::Call {
+                func: func_recursive,
+                args,
+                ..
+            } = air_tree
+            {
+                if let AirTree::Call { func, .. } = func_recursive.as_ref() {
+                    if let AirTree::Var {
+                        constructor:
+                            ValueConstructor {
+                                variant: ValueConstructorVariant::ModuleFn { name, module, .. },
+                                ..
+                            },
+                        variant_name,
+                        ..
+                    } = func.as_ref()
                     {
-                        // Remove any static-recursive-parameters, because they'll be bound statically
-                        // above the recursive part of the function
-                        // note: assumes that static_recursive_params is sorted
-                        for arg in recursive_static_indexes.iter().rev() {
-                            args.remove(*arg);
+                        // The name must match and the recursive function must not be
+                        // passed around for this optimization to work.
+                        if name == &func_key.function_name
+                            && module == &func_key.module_name
+                            && variant == variant_name
+                            && calls_and_var_usage.0 == calls_and_var_usage.1
+                        {
+                            // Remove any static-recursive-parameters, because they'll be bound statically
+                            // above the recursive part of the function
+                            // note: assumes that static_recursive_params is sorted
+                            for arg in recursive_static_indexes.iter().rev() {
+                                args.remove(*arg);
+                            }
+                            args.insert(0, func.as_ref().clone());
+                            *func_recursive = func.as_ref().clone().into();
                         }
-                        let mut new_args = vec![func.as_ref().clone()];
-                        new_args.append(args);
-                        *args = new_args;
                     }
+                }
+            } else if let AirTree::Var {
+                constructor:
+                    ValueConstructor {
+                        variant: ValueConstructorVariant::ModuleFn { name, module, .. },
+                        ..
+                    },
+                variant_name,
+                ..
+            } = &air_tree
+            {
+                if name.clone() == func_key.function_name
+                    && module.clone() == func_key.module_name
+                    && variant.clone() == variant_name.clone()
+                {
+                    let self_call = AirTree::call(
+                        air_tree.clone(),
+                        air_tree.return_type(),
+                        vec![air_tree.clone()],
+                    );
+
+                    *air_tree = self_call;
                 }
             }
         },
         true,
     );
-    let recursive_nonstatics = func_params
-        .iter()
-        .filter(|p| !potential_recursive_statics.contains(p))
-        .cloned()
-        .collect();
-    recursive_nonstatics
+
+    // In the case of equal calls to usage we can reduce the static params
+    if calls_and_var_usage.0 == calls_and_var_usage.1 {
+        let recursive_nonstatics = func_params
+            .iter()
+            .filter(|p| !potential_recursive_statics.contains(p))
+            .cloned()
+            .collect();
+        recursive_nonstatics
+    } else {
+        func_params.to_vec()
+    }
 }
 
 pub fn modify_cyclic_calls(
@@ -659,6 +675,7 @@ pub fn modify_cyclic_calls(
                                 AirTree::anon_func(
                                     names.clone(),
                                     AirTree::local_var(index_name, tipo),
+                                    false,
                                 ),
                             ],
                         );
@@ -675,7 +692,7 @@ pub fn pattern_has_conditions(
     data_types: &IndexMap<&DataTypeKey, &TypedDataType>,
 ) -> bool {
     match pattern {
-        Pattern::List { .. } | Pattern::Int { .. } => true,
+        Pattern::List { .. } | Pattern::Int { .. } | Pattern::ByteArray { .. } => true,
         Pattern::Tuple { elems, .. } => elems
             .iter()
             .any(|elem| pattern_has_conditions(elem, data_types)),
@@ -725,18 +742,16 @@ pub fn rearrange_list_clauses(
 
             let clause1_len = match clause_pattern1 {
                 Pattern::List { elements, tail, .. } => {
-                    Some(elements.len() + usize::from(tail.is_some() && clause1.guard.is_none()))
+                    Some(elements.len() + usize::from(tail.is_some()))
                 }
-                _ if clause1.guard.is_none() => Some(100000),
-                _ => None,
+                _ => Some(100000),
             };
 
             let clause2_len = match clause_pattern2 {
                 Pattern::List { elements, tail, .. } => {
-                    Some(elements.len() + usize::from(tail.is_some() && clause2.guard.is_none()))
+                    Some(elements.len() + usize::from(tail.is_some()))
                 }
-                _ if clause2.guard.is_none() => Some(100001),
-                _ => None,
+                _ => Some(100001),
             };
 
             if let Some(clause1_len) = clause1_len {
@@ -758,29 +773,9 @@ pub fn rearrange_list_clauses(
 
     // If we have a catch all, use that. Otherwise use todo which will result in error
     // TODO: fill in todo label with description
-    let plug_in_then = &|index: usize, last_clause: &TypedClause| {
-        if last_clause.guard.is_none() {
-            match &last_clause.pattern {
-                Pattern::Var { .. } | Pattern::Discard { .. } => last_clause.clone().then,
-                _ => {
-                    let tipo = last_clause.then.tipo();
-
-                    TypedExpr::Trace {
-                        location: Span::empty(),
-                        tipo: tipo.clone(),
-                        text: Box::new(TypedExpr::String {
-                            location: Span::empty(),
-                            tipo: crate::builtins::string(),
-                            value: format!("Clause hole found for {index} elements."),
-                        }),
-                        then: Box::new(TypedExpr::ErrorTerm {
-                            location: Span::empty(),
-                            tipo,
-                        }),
-                    }
-                }
-            }
-        } else {
+    let plug_in_then = &|index: usize, last_clause: &TypedClause| match &last_clause.pattern {
+        Pattern::Var { .. } | Pattern::Discard { .. } => last_clause.clone().then,
+        _ => {
             let tipo = last_clause.then.tipo();
 
             TypedExpr::Trace {
@@ -788,7 +783,7 @@ pub fn rearrange_list_clauses(
                 tipo: tipo.clone(),
                 text: Box::new(TypedExpr::String {
                     location: Span::empty(),
-                    tipo: crate::builtins::string(),
+                    tipo: Type::string(),
                     value: format!("Clause hole found for {index} elements."),
                 }),
                 then: Box::new(TypedExpr::ErrorTerm {
@@ -848,7 +843,6 @@ pub fn rearrange_list_clauses(
                             }
                             .into(),
                         },
-                        guard: None,
                         then: plug_in_then(wild_card_clause_elems, last_clause),
                     }
                 } else {
@@ -859,7 +853,6 @@ pub fn rearrange_list_clauses(
                             elements: discard_elems,
                             tail: None,
                         },
-                        guard: None,
                         then: plug_in_then(wild_card_clause_elems, last_clause),
                     }
                 };
@@ -868,7 +861,7 @@ pub fn rearrange_list_clauses(
                 wild_card_clause_elems += 1;
             }
 
-            let mut is_wild_card_elems_clause = clause.guard.is_none();
+            let mut is_wild_card_elems_clause = true;
 
             for element in elements.iter() {
                 is_wild_card_elems_clause =
@@ -880,16 +873,14 @@ pub fn rearrange_list_clauses(
                     wild_card_clause_elems += 1;
                 }
 
-                if clause.guard.is_none() && tail.is_some() && !elements.is_empty() {
+                if tail.is_some() && !elements.is_empty() {
                     last_clause_index = index;
                     last_clause_set = true;
                 }
             }
         } else if let Pattern::Var { .. } | Pattern::Discard { .. } = &clause.pattern {
-            if clause.guard.is_none() {
-                last_clause_set = true;
-                last_clause_index = index;
-            }
+            last_clause_set = true;
+            last_clause_index = index;
         } else {
             unreachable!("Found a clause that is not a list or var or discard");
         }
@@ -903,7 +894,6 @@ pub fn rearrange_list_clauses(
                         name: "_".to_string(),
                         location: Span::empty(),
                     },
-                    guard: None,
                     then: plug_in_then(index + 1, last_clause),
                 });
             }
@@ -945,8 +935,8 @@ pub fn known_data_to_type(term: Term<Name>, field_type: &Type) -> Term<Name> {
     match uplc_type {
         Some(UplcType::Integer) => Term::un_i_data().apply(term),
         Some(UplcType::ByteString) => Term::un_b_data().apply(term),
-        Some(UplcType::Bool) => Term::less_than_integer()
-            .apply(Term::integer(0.into()))
+        Some(UplcType::Bool) => Term::equals_integer()
+            .apply(Term::integer(1.into()))
             .apply(Term::fst_pair().apply(Term::unconstr_data().apply(term))),
         Some(UplcType::String) => Term::decode_utf8().apply(Term::un_b_data().apply(term)),
         Some(UplcType::Unit) => Term::unit().lambda("_").apply(term),
@@ -999,34 +989,8 @@ pub fn unknown_data_to_type(term: Term<Name>, field_type: &Type) -> Term<Name> {
             )
             .lambda("__list_data")
             .apply(Term::unlist_data().apply(term)),
-        Some(UplcType::Bool) => Term::snd_pair()
-            .apply(Term::var("__pair__"))
-            .delayed_choose_list(
-                Term::equals_integer()
-                    .apply(Term::integer(1.into()))
-                    .apply(Term::fst_pair().apply(Term::var("__pair__")))
-                    .delayed_if_then_else(
-                        Term::bool(true),
-                        Term::equals_integer()
-                            .apply(Term::integer(0.into()))
-                            .apply(Term::fst_pair().apply(Term::var("__pair__")))
-                            .delayed_if_then_else(Term::bool(false), Term::Error),
-                    ),
-                Term::Error,
-            )
-            .lambda("__pair__")
-            .apply(Term::unconstr_data().apply(term)),
-        Some(UplcType::Unit) => Term::equals_integer()
-            .apply(Term::integer(0.into()))
-            .apply(Term::fst_pair().apply(Term::var("__pair__")))
-            .delayed_if_then_else(
-                Term::snd_pair()
-                    .apply(Term::var("__pair__"))
-                    .delayed_choose_list(Term::unit(), Term::Error),
-                Term::Error,
-            )
-            .lambda("__pair__")
-            .apply(Term::unconstr_data().apply(term)),
+        Some(UplcType::Bool) => Term::unwrap_bool_or(term, |result| result, &Term::Error.delay()),
+        Some(UplcType::Unit) => Term::unwrap_void_or(term, |result| result, &Term::Error.delay()),
 
         Some(UplcType::Data) | None => term,
     }
@@ -1035,176 +999,76 @@ pub fn unknown_data_to_type(term: Term<Name>, field_type: &Type) -> Term<Name> {
 /// Due to the nature of the types BLS12_381_G1Element and BLS12_381_G2Element and String coming from bytearray
 /// We don't have error handling if the bytearray is not properly aligned to the type. Oh well lol
 /// For BLS12_381_G1Element and BLS12_381_G2Element, hash to group exists so just adopt that.
-pub fn unknown_data_to_type_debug(
-    term: Term<Name>,
+pub fn softcast_data_to_type_otherwise(
+    value: Term<Name>,
+    name: &String,
     field_type: &Type,
-    error_term: Term<Name>,
+    then: Term<Name>,
+    otherwise_delayed: Term<Name>,
 ) -> Term<Name> {
+    assert!(matches!(otherwise_delayed, Term::Var(_)));
+
     let uplc_type = field_type.get_uplc_type();
 
-    match uplc_type {
-        Some(UplcType::Integer) => Term::var("__val")
-            .delayed_choose_data(
-                error_term.clone(),
-                error_term.clone(),
-                error_term.clone(),
-                Term::un_i_data().apply(Term::var("__val")),
-                error_term.clone(),
-            )
-            .lambda("__val")
-            .apply(term),
-        Some(UplcType::ByteString) => Term::var("__val")
-            .delayed_choose_data(
-                error_term.clone(),
-                error_term.clone(),
-                error_term.clone(),
-                error_term.clone(),
-                Term::un_b_data().apply(Term::var("__val")),
-            )
-            .lambda("__val")
-            .apply(term),
-        Some(UplcType::String) => Term::var("__val")
-            .delayed_choose_data(
-                error_term.clone(),
-                error_term.clone(),
-                error_term.clone(),
-                error_term.clone(),
-                Term::decode_utf8().apply(Term::un_b_data().apply(Term::var("__val"))),
-            )
-            .lambda("__val")
-            .apply(term),
+    let callback = |v| then.lambda(name).apply(v);
 
-        Some(UplcType::List(_)) if field_type.is_map() => Term::var("__val")
-            .delayed_choose_data(
-                error_term.clone(),
-                Term::unmap_data().apply(Term::var("__val")),
-                error_term.clone(),
-                error_term.clone(),
-                error_term.clone(),
-            )
-            .lambda("__val")
-            .apply(term),
-        Some(UplcType::List(_)) => Term::var("__val")
-            .delayed_choose_data(
-                error_term.clone(),
-                error_term.clone(),
-                Term::unlist_data().apply(Term::var("__val")),
-                error_term.clone(),
-                error_term.clone(),
-            )
-            .lambda("__val")
-            .apply(term),
+    value.as_var("__val", |val| match uplc_type {
+        None => Term::choose_data_constr(val, callback, &otherwise_delayed),
 
-        Some(UplcType::Bls12_381G1Element) => Term::var("__val")
-            .delayed_choose_data(
-                error_term.clone(),
-                error_term.clone(),
-                error_term.clone(),
-                error_term.clone(),
-                Term::bls12_381_g1_uncompress().apply(Term::un_b_data().apply(Term::var("__val"))),
-            )
-            .lambda("__val")
-            .apply(term),
-        Some(UplcType::Bls12_381G2Element) => Term::var("__val")
-            .delayed_choose_data(
-                error_term.clone(),
-                error_term.clone(),
-                error_term.clone(),
-                error_term.clone(),
-                Term::bls12_381_g2_uncompress().apply(Term::un_b_data().apply(Term::var("__val"))),
-            )
-            .lambda("__val")
-            .apply(term),
-        Some(UplcType::Bls12_381MlResult) => panic!("ML Result not supported"),
-        Some(UplcType::Pair(_, _)) => Term::var("__val")
-            .delayed_choose_data(
-                error_term.clone(),
-                error_term.clone(),
-                Term::var("__list_data")
-                    .delayed_choose_list(
-                        error_term.clone(),
-                        Term::var("__tail")
-                            .delayed_choose_list(
-                                error_term.clone(),
-                                Term::tail_list()
-                                    .apply(Term::var("__tail"))
-                                    .delayed_choose_list(
-                                        Term::mk_pair_data()
-                                            .apply(
-                                                Term::head_list().apply(Term::var("__list_data")),
-                                            )
-                                            .apply(Term::head_list().apply(Term::var("__tail"))),
-                                        error_term.clone(),
-                                    ),
-                            )
-                            .lambda("__tail")
-                            .apply(Term::tail_list().apply(Term::var("__list_data"))),
-                    )
-                    .lambda("__list_data")
-                    .apply(Term::unlist_data().apply(Term::var("__val"))),
-                error_term.clone(),
-                error_term.clone(),
-            )
-            .lambda("__val")
-            .apply(term),
-        Some(UplcType::Bool) => Term::var("__val")
-            .delayed_choose_data(
-                Term::snd_pair()
-                    .apply(Term::var("__pair__"))
-                    .delayed_choose_list(
-                        Term::equals_integer()
-                            .apply(Term::integer(1.into()))
-                            .apply(Term::fst_pair().apply(Term::var("__pair__")))
-                            .delayed_if_then_else(
-                                Term::bool(true),
-                                Term::equals_integer()
-                                    .apply(Term::integer(0.into()))
-                                    .apply(Term::fst_pair().apply(Term::var("__pair__")))
-                                    .delayed_if_then_else(Term::bool(false), error_term.clone()),
-                            ),
-                        error_term.clone(),
-                    )
-                    .lambda("__pair__")
-                    .apply(Term::unconstr_data().apply(Term::var("__val"))),
-                error_term.clone(),
-                error_term.clone(),
-                error_term.clone(),
-                error_term.clone(),
-            )
-            .lambda("__val")
-            .apply(term),
-        Some(UplcType::Unit) => Term::var("__val")
-            .delayed_choose_data(
-                Term::equals_integer()
-                    .apply(Term::integer(0.into()))
-                    .apply(Term::fst_pair().apply(Term::unconstr_data().apply(Term::var("__val"))))
-                    .delayed_if_then_else(
-                        Term::snd_pair()
-                            .apply(Term::unconstr_data().apply(Term::var("__val")))
-                            .delayed_choose_list(Term::unit(), error_term.clone()),
-                        error_term.clone(),
-                    ),
-                error_term.clone(),
-                error_term.clone(),
-                error_term.clone(),
-                error_term.clone(),
-            )
-            .lambda("__val")
-            .apply(term),
+        Some(UplcType::Data) => callback(Term::Var(val)),
 
-        Some(UplcType::Data) => term,
-        // constr type
-        None => Term::var("__val")
-            .delayed_choose_data(
-                Term::var("__val"),
-                error_term.clone(),
-                error_term.clone(),
-                error_term.clone(),
-                error_term.clone(),
-            )
-            .lambda("__val")
-            .apply(term),
-    }
+        Some(UplcType::Bls12_381MlResult) => {
+            unreachable!("attempted to cast Data into Bls12_381MlResult ?!")
+        }
+
+        Some(UplcType::Integer) => Term::choose_data_integer(val, callback, &otherwise_delayed),
+
+        Some(UplcType::ByteString) => {
+            Term::choose_data_bytearray(val, callback, &otherwise_delayed)
+        }
+
+        Some(UplcType::String) => Term::choose_data_bytearray(
+            val,
+            |bytes| callback(Term::decode_utf8().apply(bytes)),
+            &otherwise_delayed,
+        ),
+
+        Some(UplcType::List(_)) if field_type.is_map() => {
+            Term::choose_data_map(val, callback, &otherwise_delayed)
+        }
+
+        Some(UplcType::List(_)) => Term::choose_data_list(val, callback, &otherwise_delayed),
+
+        Some(UplcType::Bls12_381G1Element) => Term::choose_data_bytearray(
+            val,
+            |bytes| callback(Term::bls12_381_g1_uncompress().apply(bytes)),
+            &otherwise_delayed,
+        ),
+
+        Some(UplcType::Bls12_381G2Element) => Term::choose_data_bytearray(
+            val,
+            |bytes| callback(Term::bls12_381_g2_uncompress().apply(bytes)),
+            &otherwise_delayed,
+        ),
+
+        Some(UplcType::Pair(_, _)) => Term::choose_data_list(
+            val,
+            |list| list.unwrap_pair_or(callback, &otherwise_delayed),
+            &otherwise_delayed,
+        ),
+
+        Some(UplcType::Bool) => Term::choose_data_constr(
+            val,
+            |constr| constr.unwrap_bool_or(callback, &otherwise_delayed),
+            &otherwise_delayed,
+        ),
+
+        Some(UplcType::Unit) => Term::choose_data_constr(
+            val,
+            |constr| constr.unwrap_void_or(callback, &otherwise_delayed),
+            &otherwise_delayed,
+        ),
+    })
 }
 
 pub fn convert_constants_to_data(constants: Vec<Rc<UplcConstant>>) -> Vec<UplcConstant> {
@@ -1362,7 +1226,7 @@ pub fn list_access_to_uplc(
     term: Term<Name>,
     is_list_accessor: bool,
     expect_level: ExpectLevel,
-    error_term: Term<Name>,
+    otherwise_delayed: Term<Name>,
 ) -> Term<Name> {
     let names_len = names_types_ids.len();
 
@@ -1393,7 +1257,7 @@ pub fn list_access_to_uplc(
         }
 
         return Term::var("empty_list")
-            .delayed_choose_list(term, error_term)
+            .delay_empty_choose_list(term, otherwise_delayed)
             .lambda("empty_list");
     }
 
@@ -1405,30 +1269,33 @@ pub fn list_access_to_uplc(
 
     let tail_name = |id| format!("tail_id_{}", id);
 
-    let head_item = |name, tipo: &Rc<Type>, tail_name: &str| {
+    let head_item = |name, tipo: &Rc<Type>, tail_name: &str, then: Term<Name>| {
         if name == "_" {
-            Term::unit()
+            then
         } else if tipo.is_pair() && is_list_accessor {
-            Term::head_list().apply(Term::var(tail_name.to_string()))
+            then.lambda(name)
+                .apply(Term::head_list().apply(Term::var(tail_name.to_string())))
         } else if matches!(expect_level, ExpectLevel::Full) {
             // Expect level is full so we have an unknown piece of data to cast
-            if error_term == Term::Error {
-                unknown_data_to_type(
+            if otherwise_delayed == Term::Error.delay() {
+                then.lambda(name).apply(unknown_data_to_type(
                     Term::head_list().apply(Term::var(tail_name.to_string())),
                     &tipo.to_owned(),
-                )
+                ))
             } else {
-                unknown_data_to_type_debug(
+                softcast_data_to_type_otherwise(
                     Term::head_list().apply(Term::var(tail_name.to_string())),
+                    name,
                     &tipo.to_owned(),
-                    error_term.clone(),
+                    then,
+                    otherwise_delayed.clone(),
                 )
             }
         } else {
-            known_data_to_type(
+            then.lambda(name).apply(known_data_to_type(
                 Term::head_list().apply(Term::var(tail_name.to_string())),
                 &tipo.to_owned(),
-            )
+            ))
         }
     };
 
@@ -1450,41 +1317,52 @@ pub fn list_access_to_uplc(
                     // case for no tail, but last item
                     let tail_name = tail_name(id);
 
-                    let head_item = head_item(name, tipo, &tail_name);
+                    // let head_item = head_item(name, tipo, &tail_name);
 
                     match expect_level {
-                        ExpectLevel::None => acc.lambda(name).apply(head_item).lambda(tail_name),
+                        ExpectLevel::None => {
+                            head_item(name, tipo, &tail_name, acc).lambda(tail_name)
+                        }
 
                         ExpectLevel::Full | ExpectLevel::Items => {
-                            if error_term == Term::Error && tail_present {
+                            if otherwise_delayed == Term::Error.delay() && tail_present {
                                 // No need to check last item if tail was present
-                                acc.lambda(name).apply(head_item).lambda(tail_name)
+                                head_item(name, tipo, &tail_name, acc).lambda(tail_name)
                             } else if tail_present {
                                 // Custom error instead of trying to do head_item on a possibly empty list.
                                 Term::var(tail_name.to_string())
-                                    .delayed_choose_list(
-                                        error_term.clone(),
-                                        acc.lambda(name).apply(head_item),
+                                    .delay_filled_choose_list(
+                                        otherwise_delayed.clone(),
+                                        head_item(name, tipo, &tail_name, acc),
                                     )
                                     .lambda(tail_name)
-                            } else if error_term == Term::Error {
+                            } else if otherwise_delayed == Term::Error.delay() {
                                 // Check head is last item in this list
-                                Term::tail_list()
-                                    .apply(Term::var(tail_name.to_string()))
-                                    .delayed_choose_list(acc, error_term.clone())
-                                    .lambda(name)
-                                    .apply(head_item)
-                                    .lambda(tail_name)
+                                head_item(
+                                    name,
+                                    tipo,
+                                    &tail_name,
+                                    Term::tail_list()
+                                        .apply(Term::var(tail_name.to_string()))
+                                        .delayed_choose_list(acc, Term::Error),
+                                )
+                                .lambda(tail_name)
                             } else {
                                 // Custom error if list is not empty after this head
                                 Term::var(tail_name.to_string())
-                                    .delayed_choose_list(
-                                        error_term.clone(),
-                                        Term::tail_list()
-                                            .apply(Term::var(tail_name.to_string()))
-                                            .delayed_choose_list(acc, error_term.clone())
-                                            .lambda(name)
-                                            .apply(head_item),
+                                    .delay_filled_choose_list(
+                                        otherwise_delayed.clone(),
+                                        head_item(
+                                            name,
+                                            tipo,
+                                            &tail_name,
+                                            Term::tail_list()
+                                                .apply(Term::var(tail_name.to_string()))
+                                                .delay_empty_choose_list(
+                                                    acc,
+                                                    otherwise_delayed.clone(),
+                                                ),
+                                        ),
                                     )
                                     .lambda(tail_name)
                             }
@@ -1496,23 +1374,32 @@ pub fn list_access_to_uplc(
                     // case for every item except the last item
                     let tail_name = tail_name(id);
 
-                    let head_item = head_item(name, tipo, &tail_name);
+                    // let head_item = head_item(name, tipo, &tail_name);
 
-                    if matches!(expect_level, ExpectLevel::None) || error_term == Term::Error {
-                        acc.apply(Term::tail_list().apply(Term::var(tail_name.to_string())))
-                            .lambda(name)
-                            .apply(head_item)
-                            .lambda(tail_name)
+                    if matches!(expect_level, ExpectLevel::None)
+                        || otherwise_delayed == Term::Error.delay()
+                    {
+                        head_item(
+                            name,
+                            tipo,
+                            &tail_name,
+                            acc.apply(Term::tail_list().apply(Term::var(tail_name.to_string()))),
+                        )
+                        .lambda(tail_name)
                     } else {
                         // case for a custom error if the list is empty at this point
+
                         Term::var(tail_name.to_string())
-                            .delayed_choose_list(
-                                error_term.clone(),
-                                acc.apply(
-                                    Term::tail_list().apply(Term::var(tail_name.to_string())),
-                                )
-                                .lambda(name)
-                                .apply(head_item),
+                            .delay_filled_choose_list(
+                                otherwise_delayed.clone(),
+                                head_item(
+                                    name,
+                                    tipo,
+                                    &tail_name,
+                                    acc.apply(
+                                        Term::tail_list().apply(Term::var(tail_name.to_string())),
+                                    ),
+                                ),
                             )
                             .lambda(tail_name)
                     }
@@ -1596,6 +1483,7 @@ pub fn to_data_builtin(
 
 pub fn special_case_builtin(
     func: &DefaultFunction,
+    tipo: Rc<Type>,
     count: usize,
     mut args: Vec<Term<Name>>,
 ) -> Term<Name> {
@@ -1606,6 +1494,26 @@ pub fn special_case_builtin(
 
             term.lambda("_").apply(unit)
         }
+
+        DefaultFunction::MkCons => {
+            let arg_type = tipo
+                .arg_types()
+                .and_then(|generics| generics.first().cloned())
+                .expect("mk_cons should have (exactly) one type parameter");
+
+            if let [head, tail] = &args[..] {
+                Term::mk_cons()
+                    .apply(if arg_type.is_pair() {
+                        head.clone()
+                    } else {
+                        convert_type_to_data(head.clone(), &arg_type)
+                    })
+                    .apply(tail.clone())
+            } else {
+                unreachable!("mk_cons has two arguments.");
+            }
+        }
+
         DefaultFunction::ChooseUnit
         | DefaultFunction::IfThenElse
         | DefaultFunction::ChooseList
@@ -1778,17 +1686,16 @@ pub fn cast_validator_args(term: Term<Name>, arguments: &[TypedArg]) -> Term<Nam
 }
 
 pub fn wrap_validator_condition(air_tree: AirTree, trace: TraceLevel) -> AirTree {
-    let success_branch = vec![(air_tree, AirTree::void())];
     let otherwise = match trace {
-        TraceLevel::Silent | TraceLevel::Compact => AirTree::error(void(), true),
+        TraceLevel::Silent | TraceLevel::Compact => AirTree::error(Type::void(), true),
         TraceLevel::Verbose => AirTree::trace(
             AirTree::string("Validator returned false"),
-            void(),
-            AirTree::error(void(), true),
+            Type::void(),
+            AirTree::error(Type::void(), true),
         ),
     };
 
-    AirTree::if_branches(success_branch, void(), otherwise)
+    AirTree::if_branch(Type::void(), air_tree, AirTree::void(), otherwise)
 }
 
 pub fn extract_constant(term: &Term<Name>) -> Option<Rc<UplcConstant>> {
@@ -1840,23 +1747,4 @@ pub fn get_line_columns_by_span(
     lines
         .line_and_column_number(span.start)
         .expect("Out of bounds span")
-}
-
-pub fn air_holds_msg(air: &Air) -> bool {
-    match air {
-        Air::AssertConstr { .. } | Air::AssertBool { .. } | Air::FieldsEmpty | Air::ListEmpty => {
-            true
-        }
-
-        Air::FieldsExpose { is_expect, .. }
-        | Air::TupleAccessor { is_expect, .. }
-        | Air::PairAccessor { is_expect, .. }
-        | Air::CastFromData { is_expect, .. } => *is_expect,
-
-        Air::ListAccessor { expect_level, .. } => {
-            matches!(expect_level, ExpectLevel::Full | ExpectLevel::Items)
-        }
-
-        _ => false,
-    }
 }

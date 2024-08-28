@@ -25,17 +25,17 @@ When {
                     tipo: (),
                 },
             ],
-            guard: None,
             then: Trace {
                 kind: Todo,
                 location: 28..32,
                 then: ErrorTerm {
                     location: 28..32,
                 },
-                text: String {
+                label: String {
                     location: 28..32,
                     value: "aiken::todo",
                 },
+                arguments: [],
             },
         },
         UntypedClause {
@@ -54,17 +54,17 @@ When {
                     tipo: (),
                 },
             ],
-            guard: None,
             then: Trace {
                 kind: Todo,
                 location: 47..51,
                 then: ErrorTerm {
                     location: 47..51,
                 },
-                text: String {
+                label: String {
                     location: 47..51,
                     value: "aiken::todo",
                 },
+                arguments: [],
             },
         },
     ],

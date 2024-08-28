@@ -1,11 +1,11 @@
 use crate::{
     ast::{
         Annotation, ArgBy, ArgName, ArgVia, AssignmentKind, AssignmentPattern, BinOp,
-        ByteArrayFormatPreference, CallArg, ClauseGuard, Constant, CurveType, DataType, Definition,
-        Function, IfBranch, LogicalOpChainKind, ModuleConstant, OnTestFailure, Pattern,
-        RecordConstructor, RecordConstructorArg, RecordUpdateSpread, Span, TraceKind, TypeAlias,
-        TypedArg, UnOp, UnqualifiedImport, UntypedArg, UntypedArgVia, UntypedAssignmentKind,
-        UntypedClause, UntypedClauseGuard, UntypedDefinition, UntypedFunction, UntypedModule,
+        ByteArrayFormatPreference, CallArg, Constant, CurveType, DataType, Definition, Function,
+        LogicalOpChainKind, ModuleConstant, OnTestFailure, Pattern, RecordConstructor,
+        RecordConstructorArg, RecordUpdateSpread, Span, TraceKind, TypeAlias, TypedArg,
+        TypedValidator, UnOp, UnqualifiedImport, UntypedArg, UntypedArgVia, UntypedAssignmentKind,
+        UntypedClause, UntypedDefinition, UntypedFunction, UntypedIfBranch, UntypedModule,
         UntypedPattern, UntypedRecordUpdateArg, Use, Validator, CAPTURE_VARIABLE,
     },
     docvec,
@@ -25,8 +25,8 @@ use ordinal::Ordinal;
 use std::rc::Rc;
 use vec1::Vec1;
 
-const INDENT: isize = 2;
-const DOCS_MAX_COLUMNS: isize = 80;
+pub const INDENT: isize = 2;
+pub const MAX_COLUMNS: isize = 80;
 
 pub fn pretty(writer: &mut String, module: UntypedModule, extra: ModuleExtra, src: &str) {
     let intermediate = Intermediate {
@@ -50,7 +50,7 @@ pub fn pretty(writer: &mut String, module: UntypedModule, extra: ModuleExtra, sr
 
     Formatter::with_comments(&intermediate)
         .module(&module)
-        .pretty_print(80, writer);
+        .pretty_print(MAX_COLUMNS, writer);
 }
 
 #[derive(Debug)]
@@ -130,7 +130,7 @@ impl<'comments> Formatter<'comments> {
         end != 0
     }
 
-    fn definitions<'a>(&mut self, definitions: &'a [UntypedDefinition]) -> Document<'a> {
+    pub fn definitions<'a>(&mut self, definitions: &'a [UntypedDefinition]) -> Document<'a> {
         let mut has_imports = false;
         let mut has_declarations = false;
         let mut imports = Vec::new();
@@ -232,15 +232,24 @@ impl<'comments> Formatter<'comments> {
                 return_annotation,
                 end_position,
                 ..
-            }) => self.definition_fn(public, name, args, return_annotation, body, *end_position),
+            }) => self.definition_fn(
+                public,
+                name,
+                args,
+                return_annotation,
+                body,
+                *end_position,
+                false,
+            ),
 
             Definition::Validator(Validator {
                 end_position,
-                fun,
-                other_fun,
+                handlers,
+                fallback,
                 params,
+                name,
                 ..
-            }) => self.definition_validator(params, fun, other_fun, *end_position),
+            }) => self.definition_validator(name, params, handlers, fallback, *end_position),
 
             Definition::Test(Function {
                 name,
@@ -512,16 +521,29 @@ impl<'comments> Formatter<'comments> {
         return_annotation: &'a Option<Annotation>,
         body: &'a UntypedExpr,
         end_location: usize,
+        is_validator: bool,
     ) -> Document<'a> {
         // Fn name and args
-        let head = pub_(*public)
-            .append("fn ")
-            .append(name)
-            .append(wrap_args(args.iter().map(|e| (self.fn_arg(e), false))));
+        let head = if !is_validator {
+            pub_(*public)
+                .append("fn ")
+                .append(name)
+                .append(wrap_args(args.iter().map(|e| (self.fn_arg(e), false))))
+        } else {
+            name.to_doc()
+                .append(wrap_args(args.iter().map(|e| (self.fn_arg(e), false))))
+        };
 
         // Add return annotation
         let head = match return_annotation {
-            Some(anno) => head.append(" -> ").append(self.annotation(anno)),
+            Some(anno) => {
+                let is_bool = anno.is_logically_equal(&Annotation::boolean(Span::empty()));
+                if is_validator && is_bool {
+                    head
+                } else {
+                    head.append(" -> ").append(self.annotation(anno))
+                }
+            }
             None => head,
         }
         .group();
@@ -581,57 +603,73 @@ impl<'comments> Formatter<'comments> {
 
     fn definition_validator<'a>(
         &mut self,
+        name: &'a str,
         params: &'a [UntypedArg],
-        fun: &'a UntypedFunction,
-        other_fun: &'a Option<UntypedFunction>,
+        handlers: &'a [UntypedFunction],
+        fallback: &'a UntypedFunction,
         end_position: usize,
     ) -> Document<'a> {
-        // validator(params)
-        let v_head = "validator".to_doc().append(if !params.is_empty() {
-            wrap_args(params.iter().map(|e| (self.fn_arg(e), false)))
-        } else {
-            nil()
-        });
+        // validator name(params)
+        let v_head = "validator"
+            .to_doc()
+            .append(" ")
+            .append(name)
+            .append(if !params.is_empty() {
+                wrap_args(params.iter().map(|e| (self.fn_arg(e), false)))
+            } else {
+                nil()
+            });
 
-        let fun_comments = self.pop_comments(fun.location.start);
-        let fun_doc_comments = self.doc_comments(fun.location.start);
-        let first_fn = self
-            .definition_fn(
-                &fun.public,
-                &fun.name,
-                &fun.arguments,
-                &fun.return_annotation,
-                &fun.body,
-                fun.end_position,
-            )
-            .group();
-        let first_fn = commented(fun_doc_comments.append(first_fn).group(), fun_comments);
+        let mut handler_docs = vec![];
 
-        let other_fn = match other_fun {
-            None => nil(),
-            Some(other) => {
-                let other_comments = self.pop_comments(other.location.start);
-                let other_doc_comments = self.doc_comments(other.location.start);
+        for handler in handlers.iter() {
+            let fun_comments = self.pop_comments(handler.location.start);
+            let fun_doc_comments = self.doc_comments(handler.location.start);
 
-                let other_fn = self
-                    .definition_fn(
-                        &other.public,
-                        &other.name,
-                        &other.arguments,
-                        &other.return_annotation,
-                        &other.body,
-                        other.end_position,
-                    )
-                    .group();
+            let first_fn = self
+                .definition_fn(
+                    &handler.public,
+                    &handler.name,
+                    &handler.arguments,
+                    &handler.return_annotation,
+                    &handler.body,
+                    handler.end_position,
+                    true,
+                )
+                .group();
 
-                commented(other_doc_comments.append(other_fn).group(), other_comments)
-            }
-        };
+            let first_fn = commented(fun_doc_comments.append(first_fn).group(), fun_comments);
 
-        let v_body = line()
-            .append(first_fn)
-            .append(if other_fun.is_some() { lines(2) } else { nil() })
-            .append(other_fn);
+            handler_docs.push(first_fn);
+        }
+
+        let is_exhaustive = handlers.len() >= TypedValidator::available_handler_names().len() - 1;
+
+        if !is_exhaustive || !fallback.is_default_fallback() {
+            let fallback_comments = self.pop_comments(fallback.location.start);
+            let fallback_doc_comments = self.doc_comments(fallback.location.start);
+
+            let fallback_fn = self
+                .definition_fn(
+                    &fallback.public,
+                    &fallback.name,
+                    &fallback.arguments,
+                    &fallback.return_annotation,
+                    &fallback.body,
+                    fallback.end_position,
+                    true,
+                )
+                .group();
+
+            let fallback_fn = commented(
+                fallback_doc_comments.append(fallback_fn).group(),
+                fallback_comments,
+            );
+
+            handler_docs.push(fallback_fn);
+        }
+
+        let v_body = line().append(join(handler_docs, lines(2)));
 
         let v_body = match printed_comments(self.pop_comments(end_position), false) {
             Some(comments) => v_body.append(lines(2)).append(comments).nest(INDENT),
@@ -703,6 +741,7 @@ impl<'comments> Formatter<'comments> {
         kind: UntypedAssignmentKind,
     ) -> Document<'a> {
         let keyword = match kind {
+            AssignmentKind::Is => unreachable!(),
             AssignmentKind::Let { .. } => "let",
             AssignmentKind::Expect { .. } => "expect",
         };
@@ -968,8 +1007,12 @@ impl<'comments> Formatter<'comments> {
             } => self.assignment(patterns, value, *kind),
 
             UntypedExpr::Trace {
-                kind, text, then, ..
-            } => self.trace(kind, text, then),
+                kind,
+                label,
+                then,
+                arguments,
+                ..
+            } => self.trace(kind, label, arguments, then),
 
             UntypedExpr::When {
                 subject, clauses, ..
@@ -993,14 +1036,12 @@ impl<'comments> Formatter<'comments> {
                 wrap_args(elems.iter().map(|e| (self.wrap_expr(e), false))).group()
             }
 
-            UntypedExpr::Pair { fst, snd, .. } => "Pair"
-                .to_doc()
-                .append("(")
-                .append(self.expr(fst, false))
-                .append(break_(",", ", "))
-                .append(self.expr(snd, false))
-                .append(")")
-                .group(),
+            UntypedExpr::Pair { fst, snd, .. } => {
+                let elems = [fst, snd];
+                "Pair"
+                    .to_doc()
+                    .append(wrap_args(elems.iter().map(|e| (self.wrap_expr(e), false))).group())
+            }
 
             UntypedExpr::TupleIndex { index, tuple, .. } => {
                 let suffix = Ordinal(*index + 1).suffix().to_doc();
@@ -1036,25 +1077,33 @@ impl<'comments> Formatter<'comments> {
     pub fn trace<'a>(
         &mut self,
         kind: &'a TraceKind,
-        text: &'a UntypedExpr,
+        label: &'a UntypedExpr,
+        arguments: &'a [UntypedExpr],
         then: &'a UntypedExpr,
     ) -> Document<'a> {
-        let (keyword, default_text) = match kind {
+        let (keyword, default_label) = match kind {
             TraceKind::Trace => ("trace", None),
             TraceKind::Error => ("fail", Some(DEFAULT_ERROR_STR.to_string())),
             TraceKind::Todo => ("todo", Some(DEFAULT_TODO_STR.to_string())),
         };
 
-        let body = match text {
-            UntypedExpr::String { value, .. } if Some(value) == default_text.as_ref() => {
+        let mut body = match label {
+            UntypedExpr::String { value, .. } if Some(value) == default_label.as_ref() => {
                 keyword.to_doc()
             }
             _ => keyword
                 .to_doc()
                 .append(" ")
-                .append(self.wrap_expr(text))
+                .append(self.wrap_expr(label))
                 .group(),
         };
+
+        for (ix, arg) in arguments.iter().enumerate() {
+            body = body
+                .append(if ix == 0 { ": " } else { ", " })
+                .append(self.wrap_expr(arg))
+                .group();
+        }
 
         match kind {
             TraceKind::Error | TraceKind::Todo => body,
@@ -1094,7 +1143,6 @@ impl<'comments> Formatter<'comments> {
         if args.is_empty() && spread_location.is_some() {
             if is_record {
                 name.append(" { .. }")
-            // TODO: not possible
             } else {
                 name.append("(..)")
             }
@@ -1195,7 +1243,7 @@ impl<'comments> Formatter<'comments> {
 
     pub fn if_expr<'a>(
         &mut self,
-        branches: &'a Vec1<IfBranch<UntypedExpr>>,
+        branches: &'a Vec1<UntypedIfBranch>,
         final_else: &'a UntypedExpr,
     ) -> Document<'a> {
         let if_branches = self
@@ -1223,10 +1271,44 @@ impl<'comments> Formatter<'comments> {
     pub fn if_branch<'a>(
         &mut self,
         if_keyword: Document<'a>,
-        branch: &'a IfBranch<UntypedExpr>,
+        branch: &'a UntypedIfBranch,
     ) -> Document<'a> {
         let if_begin = if_keyword
             .append(self.wrap_expr(&branch.condition))
+            .append(match &branch.is {
+                Some(AssignmentPattern {
+                    pattern,
+                    annotation,
+                    ..
+                }) => {
+                    let is_sugar = matches!(
+                        (&pattern, &branch.condition),
+                        (
+                            Pattern::Var { name, .. },
+                            UntypedExpr::Var { name: var_name, .. }
+                        ) if name == var_name
+                    );
+
+                    let Some(annotation) = &annotation else {
+                        unreachable!()
+                    };
+
+                    let is = if is_sugar {
+                        self.annotation(annotation)
+                    } else {
+                        self.pattern(pattern)
+                            .append(": ")
+                            .append(self.annotation(annotation))
+                            .group()
+                    };
+
+                    break_("", " ")
+                        .append("is")
+                        .append(break_("", " "))
+                        .append(is)
+                }
+                None => nil(),
+            })
             .append(break_("{", " {"))
             .group();
 
@@ -1286,8 +1368,15 @@ impl<'comments> Formatter<'comments> {
         let left_precedence = left.binop_precedence();
         let right_precedence = right.binop_precedence();
 
-        let left = self.expr(left, false);
-        let right = self.expr(right, false);
+        let mut left = self.expr(left, false);
+        if left.fits(MAX_COLUMNS) {
+            left = left.force_unbroken()
+        }
+
+        let mut right = self.expr(right, false);
+        if right.fits(MAX_COLUMNS) {
+            right = right.force_unbroken()
+        }
 
         self.operator_side(
             left,
@@ -1678,11 +1767,7 @@ impl<'comments> Formatter<'comments> {
         let doc = head.append(tail.clone()).group();
 
         // Wrap arguments on multi-lines if they are lengthy.
-        if doc
-            .clone()
-            .to_pretty_string(DOCS_MAX_COLUMNS)
-            .contains('\n')
-        {
+        if doc.clone().to_pretty_string(MAX_COLUMNS).contains('\n') {
             let head = name
                 .to_doc()
                 .append(self.docs_fn_args(args).force_break())
@@ -1798,10 +1883,6 @@ impl<'comments> Formatter<'comments> {
             clause.patterns.iter().map(|p| self.pattern(p)),
             " | ".to_doc(),
         );
-        let clause_doc = match &clause.guard {
-            None => clause_doc,
-            Some(guard) => clause_doc.append(" if ").append(self.clause_guard(guard)),
-        };
 
         if index == 0 {
             clause_doc
@@ -1820,7 +1901,7 @@ impl<'comments> Formatter<'comments> {
         tail: Option<&'a UntypedExpr>,
     ) -> Document<'a> {
         let comma: fn() -> Document<'a> =
-            if tail.is_none() && elements.iter().all(UntypedExpr::is_simple_constant) {
+            if elements.iter().all(UntypedExpr::is_simple_expr_to_format) {
                 || flex_break(",", ", ")
             } else {
                 || break_(",", ", ")
@@ -1834,6 +1915,12 @@ impl<'comments> Formatter<'comments> {
         let comments = self.pop_comments(pattern.location().start);
         let doc = match pattern {
             Pattern::Int { value, base, .. } => self.int(value, base),
+
+            Pattern::ByteArray {
+                value,
+                preferred_format,
+                ..
+            } => self.bytearray(value, None, preferred_format),
 
             Pattern::Var { name, .. } => name.to_doc(),
 
@@ -1857,8 +1944,14 @@ impl<'comments> Formatter<'comments> {
                 .group(),
 
             Pattern::List { elements, tail, .. } => {
+                let break_style: fn() -> Document<'a> =
+                    if elements.iter().all(Pattern::is_simple_pattern_to_format) {
+                        || flex_break(",", ", ")
+                    } else {
+                        || break_(",", ", ")
+                    };
                 let elements_document =
-                    join(elements.iter().map(|e| self.pattern(e)), break_(",", ", "));
+                    join(elements.iter().map(|e| self.pattern(e)), break_style());
                 let tail = tail.as_ref().map(|e| {
                     if e.is_discard() {
                         nil()
@@ -1898,61 +1991,6 @@ impl<'comments> Formatter<'comments> {
             .append(self.pattern(&arg.value));
 
         commented(doc, comments)
-    }
-
-    pub fn clause_guard_bin_op<'a>(
-        &mut self,
-        name: &'a str,
-        name_precedence: u8,
-        left: &'a UntypedClauseGuard,
-        right: &'a UntypedClauseGuard,
-    ) -> Document<'a> {
-        let left_precedence = left.precedence();
-        let right_precedence = right.precedence();
-        let left = self.clause_guard(left);
-        let right = self.clause_guard(right);
-        self.operator_side(left, name_precedence, left_precedence)
-            .append(name)
-            .append(self.operator_side(right, name_precedence, right_precedence.saturating_sub(1)))
-    }
-
-    fn clause_guard<'a>(&mut self, clause_guard: &'a UntypedClauseGuard) -> Document<'a> {
-        match clause_guard {
-            ClauseGuard::Not { value, .. } => {
-                docvec!["!", self.clause_guard(value)]
-            }
-            ClauseGuard::And { left, right, .. } => {
-                self.clause_guard_bin_op(" && ", clause_guard.precedence(), left, right)
-            }
-            ClauseGuard::Or { left, right, .. } => {
-                self.clause_guard_bin_op(" || ", clause_guard.precedence(), left, right)
-            }
-            ClauseGuard::Equals { left, right, .. } => {
-                self.clause_guard_bin_op(" == ", clause_guard.precedence(), left, right)
-            }
-
-            ClauseGuard::NotEquals { left, right, .. } => {
-                self.clause_guard_bin_op(" != ", clause_guard.precedence(), left, right)
-            }
-            ClauseGuard::GtInt { left, right, .. } => {
-                self.clause_guard_bin_op(" > ", clause_guard.precedence(), left, right)
-            }
-
-            ClauseGuard::GtEqInt { left, right, .. } => {
-                self.clause_guard_bin_op(" >= ", clause_guard.precedence(), left, right)
-            }
-            ClauseGuard::LtInt { left, right, .. } => {
-                self.clause_guard_bin_op(" < ", clause_guard.precedence(), left, right)
-            }
-
-            ClauseGuard::LtEqInt { left, right, .. } => {
-                self.clause_guard_bin_op(" <= ", clause_guard.precedence(), left, right)
-            }
-
-            ClauseGuard::Var { name, .. } => name.to_doc(),
-
-            ClauseGuard::Constant(constant) => self.const_expr(constant),
-        }
     }
 
     fn un_op<'a>(&mut self, value: &'a UntypedExpr, op: &'a UnOp) -> Document<'a> {

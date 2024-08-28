@@ -9,9 +9,33 @@ use std::collections::HashSet;
 
 #[derive(Debug, Clone, Diagnostic, thiserror::Error)]
 #[error("{kind}\n")]
+#[diagnostic(
+    help(
+        "{}",
+        match kind {
+            ErrorKind::Unexpected(..) if !expected.is_empty() => {
+                format!(
+                    "I am looking for one of the following patterns:\n{}",
+                    expected
+                        .iter()
+                        .map(|x| format!(
+                            "→ {}",
+                            x.to_aiken()
+                             .if_supports_color(Stdout, |s| s.purple())
+                        ))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                )
+            },
+            _ => {
+                kind.help().map(|x| x.to_string()).unwrap_or_default()
+            }
+        }
+    )
+)]
 pub struct ParseError {
     pub kind: ErrorKind,
-    #[label]
+    #[label("{}", .label.unwrap_or_default())]
     pub span: Span,
     #[allow(dead_code)]
     while_parsing: Option<(Span, &'static str)>,
@@ -26,6 +50,16 @@ impl ParseError {
             self.expected.insert(expected);
         }
         self
+    }
+
+    pub fn expected_but_got(expected: Pattern, got: Pattern, span: Span) -> Self {
+        Self {
+            kind: ErrorKind::Unexpected(got),
+            expected: HashSet::from_iter([expected]),
+            span,
+            while_parsing: None,
+            label: None,
+        }
     }
 
     pub fn invalid_assignment_right_hand_side(span: Span) -> Self {
@@ -49,13 +83,13 @@ impl ParseError {
         }
     }
 
-    pub fn invalid_when_clause_guard(span: Span) -> Self {
+    pub fn deprecated_when_clause_guard(span: Span) -> Self {
         Self {
-            kind: ErrorKind::InvalidWhenClause,
+            kind: ErrorKind::DeprecatedWhenClause,
             span,
             while_parsing: None,
             expected: HashSet::new(),
-            label: Some("invalid clause guard"),
+            label: Some("deprecated"),
         }
     }
 
@@ -114,6 +148,26 @@ impl ParseError {
             label: None,
         }
     }
+
+    pub fn match_on_curve(span: Span) -> Self {
+        Self {
+            kind: ErrorKind::PatternMatchOnCurvePoint,
+            span,
+            while_parsing: None,
+            expected: HashSet::new(),
+            label: Some("cannot pattern-match on curve point"),
+        }
+    }
+
+    pub fn match_string(span: Span) -> Self {
+        Self {
+            kind: ErrorKind::PatternMatchOnString,
+            span,
+            while_parsing: None,
+            expected: HashSet::new(),
+            label: Some("cannot pattern-match on string"),
+        }
+    }
 }
 
 impl PartialEq for ParseError {
@@ -163,7 +217,7 @@ pub enum ErrorKind {
     UnexpectedEnd,
 
     #[error("{0}")]
-    #[diagnostic(help("{}", .0.help().unwrap_or_else(|| Box::new(""))))]
+    #[diagnostic(help("{}", .0.help().unwrap_or_else(|| Box::new("")))) ]
     Unexpected(Pattern),
 
     #[error("I discovered an invalid tuple index.")]
@@ -215,33 +269,29 @@ pub enum ErrorKind {
     }))]
     MalformedBase16StringLiteral,
 
-    #[error("I came across a bytearray declared using two different notations")]
+    #[error("I came across a bytearray declared using two different notations.")]
     #[diagnostic(url("https://aiken-lang.org/language-tour/primitive-types#bytearray"))]
     #[diagnostic(help("Either use decimal or hexadecimal notation, but don't mix them."))]
     HybridNotationInByteArray,
 
-    #[error("I failed to understand a when clause guard.")]
-    #[diagnostic(url("https://aiken-lang.org/language-tour/control-flow#checking-equality-and-ordering-in-patterns"))]
+    #[error("I found a now-deprecated clause guard in a when/is expression.")]
     #[diagnostic(help("{}", formatdoc! {
-        r#"Clause guards are not as capable as standard expressions. While you can combine multiple clauses using '{operator_or}' and '{operator_and}', you can't do any arithmetic in there. They are mainly meant to compare pattern variables to some known constants using simple binary operators.
-
-           For example, the following clauses are well-formed:
-
-           {good}   (x, _) if x == 10 -> ...
-           {good}   (_, y) if y > 0 && y < 10 -> ...
-           {good}   (x, y) if x && (y > 0 || y < 10) -> ...
-
-           However, those aren't:
-
-           {bad}   (x, _) if x % 3 == 0 -> ...
-           {bad}   (x, y) if x + y > 42 -> ...
+        r#"Clause guards have been removed from Aiken. They were underused, considered potentially harmful and created needless complexity in the compiler. If you were using clause guards, our apologies, but you can now update your code and move the clause guards patterns inside a nested if/else expression.
         "#
-        , operator_or = "||".if_supports_color(Stdout, |s| s.yellow())
-        , operator_and = "&&".if_supports_color(Stdout, |s| s.yellow())
-        , good = "✔️".if_supports_color(Stdout, |s| s.green())
-        , bad = "✖️".if_supports_color(Stdout, |s| s.red())
     }))]
-    InvalidWhenClause,
+    DeprecatedWhenClause,
+
+    #[error("I choked on a curve point in a bytearray pattern.")]
+    #[diagnostic(help(
+        "You can pattern-match on bytearrays just fine, but not on G1 nor G2 elements. Use if/else with an equality if you have to compare those."
+    ))]
+    PatternMatchOnCurvePoint,
+
+    #[error("I refuse to cooperate and match a utf-8 string.")]
+    #[diagnostic(help(
+        "You can pattern-match on bytearrays but not on strings. Note that I can parse utf-8 encoded bytearrays just fine, so you probably want to drop the extra '@' and only manipulate bytearrays wherever you need to. On-chain, strings shall be avoided as much as possible."
+    ))]
+    PatternMatchOnString,
 }
 
 fn fmt_curve_type(curve: &CurveType) -> String {
@@ -278,15 +328,6 @@ pub enum Pattern {
     #[error("I found an unexpected token '{0}'.")]
     #[diagnostic(help("Try removing it!"))]
     Token(Token),
-    #[error("I found an unexpected literal value.")]
-    #[diagnostic(help("Try removing it!"))]
-    Literal,
-    #[error("I found an unexpected type name.")]
-    #[diagnostic(help("Try removing it!"))]
-    TypeIdent,
-    #[error("I found an unexpected identifier.")]
-    #[diagnostic(help("Try removing it!"))]
-    TermIdent,
     #[error("I found an unexpected end of input.")]
     End,
     #[error("I found a malformed list spread pattern.")]
@@ -295,11 +336,6 @@ pub enum Pattern {
     #[error("I found an out-of-bound byte literal.")]
     #[diagnostic(help("Bytes must be between 0-255."))]
     Byte,
-    #[error("I found an unexpected pattern.")]
-    #[diagnostic(help(
-        "If no label is provided then only variables\nmatching a field name are allowed."
-    ))]
-    RecordPunning,
     #[error("I found an unexpected label.")]
     #[diagnostic(help("You can only use labels surrounded by curly braces"))]
     Label,
@@ -308,11 +344,27 @@ pub enum Pattern {
     Discard,
 }
 
+impl Pattern {
+    fn to_aiken(&self) -> String {
+        use Pattern::*;
+        match self {
+            Token(tok) => tok.to_string(),
+            Char(c) => c.to_string(),
+            End => "<END OF FILE>".to_string(),
+            Match => "A pattern (a discard, a var, etc...)".to_string(),
+            Byte => "A byte between [0; 255]".to_string(),
+            Label => "A label".to_string(),
+            Discard => "_".to_string(),
+        }
+    }
+}
+
 impl From<char> for Pattern {
     fn from(c: char) -> Self {
         Self::Char(c)
     }
 }
+
 impl From<Token> for Pattern {
     fn from(tok: Token) -> Self {
         Self::Token(tok)

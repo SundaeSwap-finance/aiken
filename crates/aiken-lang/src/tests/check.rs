@@ -1,5 +1,5 @@
 use crate::{
-    ast::{Definition, ModuleKind, TraceLevel, Tracing, TypedModule, UntypedModule},
+    ast::{Definition, ModuleKind, Pattern, TraceLevel, Tracing, TypedModule, UntypedModule},
     builtins,
     expr::TypedExpr,
     parser,
@@ -18,6 +18,7 @@ fn check_module(
     ast: UntypedModule,
     extra: Vec<(String, UntypedModule)>,
     kind: ModuleKind,
+    tracing: Tracing,
 ) -> Result<(Vec<Warning>, TypedModule), (Vec<Warning>, Error)> {
     let id_gen = IdGenerator::new();
 
@@ -37,6 +38,7 @@ fn check_module(
                 &module_types,
                 Tracing::All(TraceLevel::Verbose),
                 &mut warnings,
+                None,
             )
             .expect("extra dependency did not compile");
         module_types.insert(package.clone(), typed_module.type_info.clone());
@@ -47,8 +49,9 @@ fn check_module(
         kind,
         "test/project",
         &module_types,
-        Tracing::All(TraceLevel::Verbose),
+        tracing,
         &mut warnings,
+        None,
     );
 
     result
@@ -57,20 +60,27 @@ fn check_module(
 }
 
 fn check(ast: UntypedModule) -> Result<(Vec<Warning>, TypedModule), (Vec<Warning>, Error)> {
-    check_module(ast, Vec::new(), ModuleKind::Lib)
+    check_module(ast, Vec::new(), ModuleKind::Lib, Tracing::verbose())
+}
+
+fn check_with_verbosity(
+    ast: UntypedModule,
+    level: TraceLevel,
+) -> Result<(Vec<Warning>, TypedModule), (Vec<Warning>, Error)> {
+    check_module(ast, Vec::new(), ModuleKind::Lib, Tracing::All(level))
 }
 
 fn check_with_deps(
     ast: UntypedModule,
     extra: Vec<(String, UntypedModule)>,
 ) -> Result<(Vec<Warning>, TypedModule), (Vec<Warning>, Error)> {
-    check_module(ast, extra, ModuleKind::Lib)
+    check_module(ast, extra, ModuleKind::Lib, Tracing::verbose())
 }
 
 fn check_validator(
     ast: UntypedModule,
 ) -> Result<(Vec<Warning>, TypedModule), (Vec<Warning>, Error)> {
-    check_module(ast, Vec::new(), ModuleKind::Validator)
+    check_module(ast, Vec::new(), ModuleKind::Validator, Tracing::verbose())
 }
 
 #[test]
@@ -101,8 +111,8 @@ fn bls12_381_ml_result_in_data_type() {
 #[test]
 fn validator_illegal_return_type() {
     let source_code = r#"
-      validator {
-        fn foo(d, r, c) {
+      validator foo {
+        spend(d, r, c) -> Int {
           1
         }
       }
@@ -130,8 +140,8 @@ fn implicitly_discard_void() {
 #[test]
 fn validator_illegal_arity() {
     let source_code = r#"
-      validator {
-        fn foo(c) {
+      validator foo {
+        mint(c) {
           True
         }
       }
@@ -198,7 +208,7 @@ fn illegal_function_comparison() {
     "#;
 
     assert!(matches!(
-        dbg!(check_validator(parse(source_code))),
+        check_validator(parse(source_code)),
         Err((_, Error::IllegalComparison { .. }))
     ))
 }
@@ -287,7 +297,7 @@ fn illegal_unserialisable_in_generic_miller_loop() {
     "#;
 
     assert!(matches!(
-        dbg!(check(parse(source_code))),
+        check(parse(source_code)),
         Err((_, Error::IllegalTypeInData { .. }))
     ))
 }
@@ -308,19 +318,17 @@ fn mark_constructors_as_used_via_field_access() {
         bar: Int,
       }
 
-      validator {
-        fn foo(d: Datum, _r, _c) {
-          when d is {
-            D0(params) -> params.foo == 1
-            D1(_params) -> False
-          }
+      fn spend(d: Datum, _r, _c) {
+        when d is {
+          D0(params) -> params.foo == 1
+          D1(_params) -> False
         }
       }
     "#;
 
-    let (warnings, _) = check_validator(parse(source_code)).unwrap();
+    let (warnings, _) = check(parse(source_code)).unwrap();
 
-    assert_eq!(warnings.len(), 1)
+    assert_eq!(warnings.len(), 2)
 }
 
 #[test]
@@ -349,8 +357,8 @@ fn expect_multi_patterns() {
 #[test]
 fn validator_correct_form() {
     let source_code = r#"
-      validator {
-        fn foo(d, r, c) {
+      validator foo {
+        spend(d: Option<Data>, r, oref, c) {
           True
         }
       }
@@ -362,8 +370,8 @@ fn validator_correct_form() {
 #[test]
 fn validator_in_lib_warning() {
     let source_code = r#"
-      validator {
-        fn foo(c) {
+      validator foo {
+        spend(c) {
           True
         }
       }
@@ -380,12 +388,12 @@ fn validator_in_lib_warning() {
 #[test]
 fn multi_validator() {
     let source_code = r#"
-      validator(foo: ByteArray, bar: Int) {
-        fn spend(_d, _r, _c) {
+      validator foo(foo: ByteArray, bar: Int) {
+        spend(_d: Option<Data>, _r, _oref, _c) {
           foo == #"aabb"
         }
 
-        fn mint(_r, _c) {
+        mint(_r, _p, _c) {
           bar == 0
         }
       }
@@ -399,12 +407,12 @@ fn multi_validator() {
 #[test]
 fn multi_validator_warning() {
     let source_code = r#"
-      validator(foo: ByteArray, bar: Int) {
-        fn spend(_d, _r, _c) {
+      validator foo(foo: ByteArray, bar: Int) {
+        spend(_d: Option<Data>, _r, _oref, _c) {
           foo == #"aabb"
         }
 
-        fn mint(_r, _c) {
+        mint(_r, _p, _c) {
           True
         }
       }
@@ -449,8 +457,8 @@ fn exhaustiveness_simple() {
 #[test]
 fn validator_args_no_annotation() {
     let source_code = r#"
-      validator(d) {
-        fn foo(a, b, c) {
+      validator hello(d) {
+        spend(a: Option<Data>, b, oref, c) {
           True
         }
       }
@@ -467,9 +475,13 @@ fn validator_args_no_annotation() {
             assert!(param.tipo.is_data());
         });
 
-        validator.fun.arguments.iter().for_each(|arg| {
-            assert!(arg.tipo.is_data());
-        })
+        validator.handlers[0]
+            .arguments
+            .iter()
+            .skip(1)
+            .for_each(|arg| {
+                assert!(arg.tipo.is_data());
+            })
     })
 }
 
@@ -902,30 +914,6 @@ fn exhaustiveness_nested_list_and_tuples() {
 }
 
 #[test]
-fn exhaustiveness_guard() {
-    let source_code = r#"
-        fn foo() {
-            when [(True, 42)] is {
-                [(True,  x), ..] if x == 42 -> Void
-                [(False, x), ..] -> Void
-                [] -> Void
-            }
-        }
-    "#;
-
-    assert!(matches!(
-        check(parse(source_code)),
-        Err((
-            _,
-            Error::NotExhaustivePatternMatch {
-                unmatched,
-                ..
-            }
-        )) if unmatched[0] == "[(True, _), ..]"
-    ));
-}
-
-#[test]
 fn expect_sugar_correct_type() {
     let source_code = r#"
         fn foo() {
@@ -1103,6 +1091,28 @@ fn assignement_last_expr_if_final_else() {
 }
 
 #[test]
+fn assignment_last_expr_logical_chain() {
+    let source_code = r#"
+        pub fn foo() -> Bool {
+            and {
+                expect 1 + 1 == 2,
+                True,
+                2 > 0,
+                or {
+                    expect True,
+                    False,
+                }
+            }
+        }
+    "#;
+
+    assert!(matches!(
+        check(parse(source_code)),
+        Err((_, Error::LastExpressionIsAssignment { .. }))
+    ))
+}
+
+#[test]
 fn if_scoping() {
     let source_code = r#"
         pub fn foo(c) {
@@ -1180,25 +1190,6 @@ fn list_pattern_4() {
           let xs = [1, 2, 3]
           let x = when xs is {
             [] -> 1
-            [x] -> x
-            [x, ..] if x > 10 -> x
-          }
-          x == 1
-        }
-    "#;
-    assert!(matches!(
-        check(parse(source_code)),
-        Err((_, Error::NotExhaustivePatternMatch { .. }))
-    ))
-}
-
-#[test]
-fn list_pattern_5() {
-    let source_code = r#"
-        test foo() {
-          let xs = [1, 2, 3]
-          let x = when xs is {
-            [] -> 1
             [_, ..] -> 1
           }
           x == 1
@@ -1208,7 +1199,7 @@ fn list_pattern_5() {
 }
 
 #[test]
-fn list_pattern_6() {
+fn list_pattern_5() {
     let source_code = r#"
         test foo() {
           let xs = [1, 2, 3]
@@ -1288,8 +1279,32 @@ fn trace_non_strings() {
             True
         }
     "#;
+    assert!(check(parse(source_code)).is_ok())
+}
+
+#[test]
+fn trace_string_label_compact() {
+    let source_code = r#"
+        test foo() {
+            trace @"foo": [1,2,3]
+            True
+        }
+    "#;
+
+    assert!(check(parse(source_code)).is_ok())
+}
+
+#[test]
+fn trace_non_string_label_compact() {
+    let source_code = r#"
+        test foo() {
+            trace(14 + 42)
+            True
+        }
+    "#;
+
     assert!(matches!(
-        check(parse(source_code)),
+        check_with_verbosity(parse(source_code), TraceLevel::Compact),
         Err((_, Error::CouldNotUnify { .. }))
     ))
 }
@@ -1756,8 +1771,7 @@ fn pipe_wrong_arity_fully_saturated_return_fn() {
 fn fuzzer_ok_basic() {
     let source_code = r#"
         fn int() -> Fuzzer<Int> { todo }
-
-        test prop(n via int()) { todo }
+        test prop(n via int()) { True }
     "#;
 
     assert!(check(parse(source_code)).is_ok());
@@ -1767,8 +1781,7 @@ fn fuzzer_ok_basic() {
 fn fuzzer_ok_explicit() {
     let source_code = r#"
         fn int(prng: PRNG) -> Option<(PRNG, Int)> { todo }
-
-        test prop(n via int) { todo }
+        test prop(n via int) { Void }
     "#;
 
     assert!(check(parse(source_code)).is_ok());
@@ -1780,7 +1793,7 @@ fn fuzzer_ok_list() {
         fn int() -> Fuzzer<Int> { todo }
         fn list(a: Fuzzer<a>) -> Fuzzer<List<a>> { todo }
 
-        test prop(xs via list(int())) { todo }
+        test prop(xs via list(int())) { True }
     "#;
 
     assert!(check(parse(source_code)).is_ok());
@@ -1993,18 +2006,6 @@ fn forbid_expect_into_opaque_type_from_data() {
 }
 
 #[test]
-fn allow_expect_into_type_from_data() {
-    let source_code = r#"
-        fn bar(n: Data) {
-          expect a: Option<Int> = n
-          a
-        }
-    "#;
-
-    assert!(check(parse(source_code)).is_ok())
-}
-
-#[test]
 fn forbid_partial_down_casting() {
     let source_code = r#"
         type Foo {
@@ -2043,12 +2044,157 @@ fn forbid_partial_up_casting() {
 }
 
 #[test]
-fn allow_expect_into_type_from_data_2() {
+fn allow_expect_into_type_from_data() {
+    let source_code = r#"
+        fn bar(n: Data) {
+          expect a: Option<Int> = n
+          a
+        }
+    "#;
+
+    assert!(check(parse(source_code)).is_ok())
+}
+
+#[test]
+fn forbid_casting_into_type_from_data() {
+    let source_code = r#"
+        fn bar(n: Data) {
+          let a: Option<Int> = n
+          a
+        }
+    "#;
+
+    assert!(matches!(
+        check(parse(source_code)),
+        Err((_, Error::CouldNotUnify { .. }))
+    ))
+}
+
+#[test]
+fn forbid_casting_into_var_from_data_with_ann() {
+    let source_code = r#"
+        fn bar(n: Data) {
+          let a: Option<Int> = n
+          a
+        }
+    "#;
+
+    assert!(matches!(
+        check(parse(source_code)),
+        Err((_, Error::CouldNotUnify { .. }))
+    ))
+}
+
+#[test]
+fn allow_let_rebinding() {
+    let source_code = r#"
+        fn bar(n: Data) {
+          let a = n
+          a
+        }
+    "#;
+
+    assert!(check(parse(source_code)).is_ok())
+}
+
+#[test]
+fn expect_rebinding_requires_annotation() {
+    let source_code = r#"
+        fn bar(n: Data) -> Option<Int> {
+          expect a = n
+          a
+        }
+    "#;
+
+    assert!(matches!(
+        check(parse(source_code)),
+        Err((_, Error::CastDataNoAnn { .. }))
+    ))
+}
+
+#[test]
+fn forbid_casting_into_var_from_data_with_ann_indirect() {
+    let source_code = r#"
+        fn bar(n: Data) -> Option<Int> {
+          let a = n
+          a
+        }
+    "#;
+
+    assert!(matches!(
+        check(parse(source_code)),
+        Err((_, Error::CouldNotUnify { .. }))
+    ))
+}
+
+#[test]
+fn forbid_casting_into_pattern_from_data() {
+    let source_code = r#"
+        fn bar(n: Data) {
+          let Some(a) = n
+          a
+        }
+    "#;
+
+    assert!(matches!(
+        check(parse(source_code)),
+        Err((_, Error::CouldNotUnify { .. }))
+    ))
+}
+
+#[test]
+fn allow_expect_into_monomorphic_type_from_data_with_pattern() {
     let source_code = r#"
         fn bar(n: Data) {
           expect Some(a): Option<Int> = n
           a
         }
+    "#;
+
+    assert!(check(parse(source_code)).is_ok())
+}
+
+#[test]
+fn forbid_expect_into_generic_type_from_data_with_pattern() {
+    let source_code = r#"
+        fn bar(n: Data) {
+          expect Some(a) = n
+          a
+        }
+    "#;
+
+    assert!(matches!(
+        check(parse(source_code)),
+        Err((_, Error::CastDataNoAnn { .. }))
+    ))
+}
+
+#[test]
+fn allow_generic_expect_without_typecast() {
+    let source_code = r#"
+        pub fn unwrap(opt: Option<a>) -> a {
+          expect Some(a) = opt
+          a
+        }
+    "#;
+
+    assert!(check(parse(source_code)).is_ok())
+}
+
+#[test]
+fn allow_expect_into_custom_type_from_data_no_annotation() {
+    let source_code = r#"
+        type OrderDatum {
+            requested_handle: ByteArray,
+            amount: Int,
+            other: Bool,
+        }
+
+        fn foo(datum: Data) {
+            expect OrderDatum { requested_handle, .. } = datum
+            requested_handle
+        }
+
     "#;
 
     assert!(check(parse(source_code)).is_ok())
@@ -2078,7 +2224,7 @@ fn forbid_expect_from_arbitrary_type() {
 }
 
 #[test]
-fn forbid_expect_into_opaque_type_constructor_without_typecasting_in_module() {
+fn allow_expect_into_opaque_type_constructor_without_typecasting_in_module() {
     let source_code = r#"
         opaque type Thing {
           Foo(Int)
@@ -2328,9 +2474,11 @@ fn validator_private_type_leak() {
           bar: Int,
         }
 
-        validator {
-          pub fn bar(datum: Datum, redeemer: Redeemer, _ctx) {
-            datum.foo == redeemer.bar
+        validator bar {
+          spend(datum: Option<Datum>, redeemer: Redeemer, _oref, _ctx) {
+            expect Some(d) = datum
+
+            d.foo == redeemer.bar
           }
         }
     "#;
@@ -2352,30 +2500,11 @@ fn validator_public() {
           bar: Int,
         }
 
-        validator {
-          pub fn bar(datum: Datum, redeemer: Redeemer, _ctx) {
-            datum.foo == redeemer.bar
-          }
-        }
-    "#;
+        validator bar {
+          spend(datum: Option<Datum>, redeemer: Redeemer, _oref, _ctx) {
+            expect Some(d) = datum
 
-    assert!(check_validator(parse(source_code)).is_ok())
-}
-
-#[test]
-fn validator_private_everything() {
-    let source_code = r#"
-        type Datum {
-          foo: Int,
-        }
-
-        type Redeemer {
-          bar: Int,
-        }
-
-        validator {
-          fn bar(datum: Datum, redeemer: Redeemer, _ctx) {
-            datum.foo == redeemer.bar
+            d.foo == redeemer.bar
           }
         }
     "#;
@@ -2417,7 +2546,7 @@ fn partial_eq_call_args() {
     "#;
 
     assert!(matches!(
-        dbg!(check(parse(source_code))),
+        check(parse(source_code)),
         Err((_, Error::IncorrectFieldsArity { .. }))
     ));
 }
@@ -2435,7 +2564,7 @@ fn partial_eq_callback_args() {
     "#;
 
     assert!(matches!(
-        dbg!(check(parse(source_code))),
+        check(parse(source_code)),
         Err((_, Error::CouldNotUnify { .. }))
     ));
 }
@@ -2453,7 +2582,7 @@ fn partial_eq_callback_return() {
     "#;
 
     assert!(matches!(
-        dbg!(check(parse(source_code))),
+        check(parse(source_code)),
         Err((_, Error::CouldNotUnify { .. }))
     ));
 }
@@ -2488,7 +2617,7 @@ fn pair_index_out_of_bound() {
     "#;
 
     assert!(matches!(
-        dbg!(check_validator(parse(source_code))),
+        check_validator(parse(source_code)),
         Err((_, Error::PairIndexOutOfBound { .. }))
     ))
 }
@@ -2502,7 +2631,7 @@ fn not_indexable() {
     "#;
 
     assert!(matches!(
-        dbg!(check_validator(parse(source_code))),
+        check_validator(parse(source_code)),
         Err((_, Error::NotIndexable { .. }))
     ))
 }
@@ -2520,7 +2649,7 @@ fn out_of_scope_access() {
     "#;
 
     assert!(matches!(
-        dbg!(check_validator(parse(source_code))),
+        check_validator(parse(source_code)),
         Err((_, Error::UnknownVariable { .. }))
     ))
 }
@@ -2552,7 +2681,7 @@ fn fn_single_variant_pattern() {
         }
     "#;
 
-    assert!(dbg!(check(parse(source_code))).is_ok());
+    assert!(check(parse(source_code)).is_ok());
 }
 
 #[test]
@@ -2569,7 +2698,542 @@ fn fn_multi_variant_pattern() {
     "#;
 
     assert!(matches!(
-        dbg!(check_validator(parse(source_code))),
+        check_validator(parse(source_code)),
         Err((_, Error::NotExhaustivePatternMatch { .. }))
+    ))
+}
+
+#[test]
+fn if_soft_cast() {
+    let source_code = r#"
+        pub type Foo {
+            a: Int
+        }
+
+        pub fn foo(foo: Data) -> Int {
+          if foo is bar: Foo {
+            bar.a
+          } else {
+            0
+          }
+        }
+    "#;
+
+    assert!(check(parse(source_code)).is_ok());
+}
+
+#[test]
+fn if_soft_cast_sugar() {
+    let source_code = r#"
+        pub type Foo {
+            a: Int
+        }
+
+        pub fn foo(foo: Data) -> Int {
+          if foo is Foo {
+            foo.a
+          } else {
+            0
+          }
+        }
+    "#;
+
+    assert!(check(parse(source_code)).is_ok());
+}
+
+#[test]
+fn if_soft_cast_record() {
+    let source_code = r#"
+        pub type Foo {
+            a: Int
+        }
+
+        pub fn foo(foo: Data) -> Int {
+          if foo is Foo { a }: Foo {
+            a
+          } else {
+            0
+          }
+        }
+    "#;
+
+    assert!(check(parse(source_code)).is_ok());
+}
+
+#[test]
+fn if_soft_cast_no_scope_leak() {
+    let source_code = r#"
+        pub type Foo {
+            a: Int
+        }
+
+        pub fn foo(foo: Data) -> Int {
+          if foo is bar: Foo {
+            bar.a
+          } else {
+            bar
+          }
+        }
+    "#;
+
+    assert!(matches!(
+        check_validator(parse(source_code)),
+        Err((_, Error::UnknownVariable { name, ..  })) if name == "bar"
+    ))
+}
+
+#[test]
+fn if_soft_cast_no_scope_leak_2() {
+    let source_code = r#"
+        pub type Foo {
+            a: Int
+        }
+
+        pub fn foo(foo: Data) -> Int {
+          if foo is Foo { a }: Foo {
+            a
+          } else {
+            a
+          }
+        }
+    "#;
+
+    assert!(matches!(
+        check_validator(parse(source_code)),
+        Err((_, Error::UnknownVariable { name, ..  })) if name == "a"
+    ))
+}
+
+#[test]
+fn if_soft_cast_unused_pattern() {
+    let source_code = r#"
+        pub type Foo {
+            a: Int
+        }
+
+        pub fn foo(foo: Data) -> Int {
+          if foo is Foo { a }: Foo {
+            1
+          } else {
+            0
+          }
+        }
+    "#;
+
+    let (warnings, _ast) = check(parse(source_code)).unwrap();
+
+    assert!(matches!(
+        warnings[0],
+        Warning::UnusedVariable { ref name, ..  } if name == "a"
+    ))
+}
+
+#[test]
+fn if_soft_cast_not_data() {
+    let source_code = r#"
+        pub type Foo {
+            Bar { a: Int }
+            Buzz { b: Int }
+        }
+
+        pub fn foo(foo: Foo) -> Int {
+          if foo is Bar { a }: Foo {
+            a
+          } else {
+            0
+          }
+        }
+    "#;
+
+    let (warnings, _ast) = check(parse(source_code)).unwrap();
+
+    assert!(matches!(warnings[0], Warning::UseWhenInstead { .. }))
+}
+
+#[test]
+fn side_effects() {
+    let source_code = r#"
+        pub fn side_effects() {
+            trace "Aiken, rocks!"
+            Void
+        }
+
+        pub fn foo() {
+            expect _ = side_effects()
+            True
+        }
+    "#;
+
+    let (warnings, ast) = check(parse(source_code)).unwrap();
+
+    assert!(warnings.is_empty(), "no warnings: {warnings:#?}");
+
+    if let Some(Definition::Fn(ref foo)) = ast.definitions().last() {
+        if let TypedExpr::Sequence {
+            ref expressions, ..
+        } = foo.body
+        {
+            matches!(
+                expressions[..],
+                [
+                    TypedExpr::Assignment {
+                        pattern: Pattern::Discard { .. },
+                        ..
+                    },
+                    TypedExpr::Var { .. },
+                ],
+            );
+        } else {
+            unreachable!();
+        }
+    } else {
+        unreachable!();
+    }
+}
+
+#[test]
+fn pattern_bytearray() {
+    let source_code = r#"
+        pub fn main(foo: ByteArray) {
+            when foo is {
+                #[1, 2, 3] -> True
+                #"00ff" -> True
+                "Aiken, rocks!" -> True
+                _ -> False
+            }
+        }
+    "#;
+
+    let result = check(parse(source_code));
+    assert!(result.is_ok());
+
+    let (warnings, _) = result.unwrap();
+    assert!(warnings.is_empty(), "no warnings: {warnings:#?}");
+}
+
+#[test]
+fn pattern_bytearray_not_unify_clause_list() {
+    let source_code = r#"
+        pub fn main(foo: ByteArray) {
+            when foo is {
+                [1, 2, 3] -> True
+                _ -> False
+            }
+        }
+    "#;
+
+    assert!(matches!(
+        check(parse(source_code)),
+        Err((_, Error::CouldNotUnify { .. }))
+    ))
+}
+
+#[test]
+fn pattern_bytearray_not_unify_clause_int() {
+    let source_code = r#"
+        pub fn main(foo: ByteArray) {
+            when foo is {
+                42 -> True
+                _ -> False
+            }
+        }
+    "#;
+
+    assert!(matches!(
+        check(parse(source_code)),
+        Err((_, Error::CouldNotUnify { .. }))
+    ))
+}
+
+#[test]
+fn pattern_bytearray_not_unify_subject() {
+    let source_code = r#"
+        pub fn main(foo: String) {
+            when foo is {
+                "42" -> True
+                _ -> False
+            }
+        }
+    "#;
+
+    assert!(matches!(
+        check(parse(source_code)),
+        Err((_, Error::CouldNotUnify { .. }))
+    ))
+}
+
+#[test]
+fn recover_no_assignment_sequence() {
+    let source_code = r#"
+        pub fn main() {
+            let result = 42
+            expect result + 1 == 43
+        }
+    "#;
+
+    assert!(check(parse(source_code)).is_ok());
+}
+
+#[test]
+fn recover_no_assignment_fn_body() {
+    let source_code = r#"
+        pub fn is_bool(foo: Data) -> Void {
+            expect _: Bool = foo
+        }
+    "#;
+
+    assert!(check(parse(source_code)).is_ok());
+}
+
+#[test]
+fn recover_no_assignment_when_clause() {
+    let source_code = r#"
+        pub fn main(foo) {
+            when foo is {
+                [] -> Void
+                [x, ..] -> expect _: Int = x
+            }
+        }
+    "#;
+
+    assert!(check(parse(source_code)).is_ok());
+}
+
+#[test]
+fn recover_no_assignment_fn_if_then_else() {
+    let source_code = r#"
+        pub fn foo(weird_maths) -> Void {
+            if weird_maths {
+                expect 1 == 2
+            } else {
+                expect 1 + 1 == 2
+            }
+        }
+    "#;
+
+    assert!(check(parse(source_code)).is_ok());
+}
+
+#[test]
+fn test_return_explicit_void() {
+    let source_code = r#"
+        test foo() {
+            Void
+        }
+    "#;
+
+    assert!(check(parse(source_code)).is_ok());
+}
+
+#[test]
+fn test_return_implicit_void() {
+    let source_code = r#"
+        test foo() {
+            let data: Data = 42
+            expect _: Int = data
+        }
+    "#;
+
+    assert!(check(parse(source_code)).is_ok());
+}
+
+#[test]
+fn test_return_illegal() {
+    let source_code = r#"
+        test foo() {
+            42
+        }
+    "#;
+
+    assert!(matches!(
+        check(parse(source_code)),
+        Err((_, Error::IllegalTestType { .. }))
+    ))
+}
+
+#[test]
+fn validator_by_name() {
+    let source_code = r#"
+        validator foo {
+            mint(_redeemer: Data, policy_id: ByteArray, _self: Data) {
+                policy_id == "foo"
+            }
+        }
+
+        test test_1() {
+            foo.mint(Void, "foo", Void)
+        }
+    "#;
+
+    assert!(check_validator(parse(source_code)).is_ok())
+}
+
+#[test]
+fn validator_by_name_with_params() {
+    let source_code = r#"
+        validator foo(_thing: Data) {
+            mint(_redeemer: Data, policy_id: ByteArray, _self: Data) {
+                policy_id == "foo"
+            }
+        }
+
+        test test_1() {
+            foo.mint(Void, Void, "foo", Void)
+        }
+    "#;
+
+    assert!(check_validator(parse(source_code)).is_ok())
+}
+
+#[test]
+fn validator_by_name_unknown_handler() {
+    let source_code = r#"
+        validator foo {
+            mint(_redeemer: Data, policy_id: ByteArray, _self: Data) {
+                policy_id == "foo"
+            }
+        }
+
+        test foo() {
+            foo.bar(Void, "foo", Void)
+        }
+    "#;
+
+    assert!(matches!(
+        check_validator(parse(source_code)),
+        Err((_, Error::UnknownValidatorHandler { .. }))
+    ))
+}
+
+#[test]
+fn validator_by_name_module_duplicate() {
+    let source_code = r#"
+        use aiken/builtin
+
+        validator builtin {
+            mint(_redeemer: Data, _policy_id: ByteArray, _self: Data) {
+                True
+            }
+        }
+    "#;
+
+    assert!(matches!(
+        check_validator(parse(source_code)),
+        Err((_, Error::DuplicateName { .. }))
+    ))
+}
+
+#[test]
+fn validator_by_name_validator_duplicate_1() {
+    let source_code = r#"
+        validator foo {
+            mint(_redeemer: Data, _policy_id: ByteArray, _self: Data) {
+                True
+            }
+        }
+
+        validator foo {
+            mint(_redeemer: Data, _policy_id: ByteArray, _self: Data) {
+                True
+            }
+        }
+    "#;
+
+    assert!(matches!(
+        check_validator(parse(source_code)),
+        Err((_, Error::DuplicateName { .. }))
+    ))
+}
+
+#[test]
+fn validator_by_name_validator_duplicate_2() {
+    let source_code = r#"
+        validator foo {
+            mint(_redeemer: Data, _policy_id: ByteArray, _self: Data) {
+                True
+            }
+
+            mint(_redeemer: Data, _policy_id: ByteArray, _self: Data) {
+                True
+            }
+        }
+    "#;
+
+    assert!(matches!(
+        check_validator(parse(source_code)),
+        Err((_, Error::DuplicateName { .. }))
+    ))
+}
+
+#[test]
+fn exhaustive_handlers() {
+    let source_code = r#"
+            validator foo {
+              mint(_redeemer, _policy_id, _self) {
+                True
+              }
+
+              spend(_datum, _redeemer, _policy_id, _self) {
+                True
+              }
+
+              withdraw(_redeemer, _account, _self) {
+                True
+              }
+
+              publish(_redeemer, _certificate, _self) {
+                True
+              }
+
+              vote(_redeemer, _voter, _self) {
+                True
+              }
+
+              propose(_redeemer, _proposal, _self) {
+                True
+              }
+            }
+        "#;
+
+    assert!(check_validator(parse(source_code)).is_ok())
+}
+
+#[test]
+fn extraneous_fallback_on_exhaustive_handlers() {
+    let source_code = r#"
+            validator foo {
+              mint(_redeemer, _policy_id, _self) {
+                True
+              }
+
+              spend(_datum, _redeemer, _policy_id, _self) {
+                True
+              }
+
+              withdraw(_redeemer, _account, _self) {
+                True
+              }
+
+              publish(_redeemer, _certificate, _self) {
+                True
+              }
+
+              vote(_redeemer, _voter, _self) {
+                True
+              }
+
+              propose(_redeemer, _proposal, _self) {
+                True
+              }
+
+              else (_) -> Bool {
+                fail
+              }
+            }
+        "#;
+
+    assert!(matches!(
+        check_validator(parse(source_code)),
+        Err((_, Error::UnexpectedValidatorFallback { .. }))
     ))
 }

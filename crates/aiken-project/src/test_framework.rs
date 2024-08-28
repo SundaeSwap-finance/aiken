@@ -1,7 +1,6 @@
 use aiken_lang::ast::OnTestFailure;
 pub(crate) use aiken_lang::{
     ast::{BinOp, DataTypeKey, IfBranch, Span, TypedArg, TypedDataType, TypedTest},
-    builtins::bool,
     expr::{TypedExpr, UntypedExpr},
     format::Formatter,
     gen_uplc::CodeGenerator,
@@ -12,7 +11,7 @@ use cryptoxide::{blake2b::Blake2b, digest::Digest};
 use indexmap::IndexMap;
 use itertools::Itertools;
 use owo_colors::{OwoColorize, Stream};
-use pallas::ledger::primitives::alonzo::{Constr, PlutusData};
+use pallas_primitives::alonzo::{Constr, PlutusData};
 use patricia_tree::PatriciaMap;
 use std::{
     borrow::Borrow, collections::BTreeMap, convert::TryFrom, ops::Deref, path::PathBuf, rc::Rc,
@@ -495,7 +494,7 @@ impl Prng {
     /// Obtain a Prng back from a fuzzer execution. As a reminder, fuzzers have the following
     /// signature:
     ///
-    ///   type Fuzzer<a> = fn(Prng) -> Option<(Prng, a)>
+    /// `type Fuzzer<a> = fn(Prng) -> Option<(Prng, a)>`
     ///
     /// In nominal scenarios (i.e. when the fuzzer is made from a seed and evolve pseudo-randomly),
     /// it cannot yield 'None'. When replayed however, we can't easily guarantee that the changes
@@ -731,7 +730,7 @@ impl<'a> Counterexample<'a> {
                         let jv = self.choices[j];
 
                         // Replace
-                        if iv > 0 && jv <= u8::max_value() - iv {
+                        if iv > 0 && jv <= u8::MAX - iv {
                             self.binary_search_replace(0, iv, |v| vec![(i, v), (j, jv + (iv - v))]);
                         }
 
@@ -1056,7 +1055,7 @@ impl TryFrom<TypedExpr> for Assertion<TypedExpr> {
                 left,
                 right,
                 ..
-            } if tipo == bool() => {
+            } if tipo == Type::bool() => {
                 // 'and' and 'or' are left-associative operators.
                 match (*right).clone().try_into() {
                     Ok(Assertion {
@@ -1094,7 +1093,7 @@ impl TryFrom<TypedExpr> for Assertion<TypedExpr> {
                     let then_is_true = match body {
                         TypedExpr::Var {
                             name, constructor, ..
-                        } => name == "True" && constructor.tipo == bool(),
+                        } => name == "True" && constructor.tipo == Type::bool(),
                         _ => false,
                     };
 
@@ -1102,7 +1101,7 @@ impl TryFrom<TypedExpr> for Assertion<TypedExpr> {
                         TypedExpr::Trace { then, .. } => match *then {
                             TypedExpr::Var {
                                 name, constructor, ..
-                            } => name == "False" && constructor.tipo == bool(),
+                            } => name == "False" && constructor.tipo == Type::bool(),
                             _ => false,
                         },
                         _ => false,
@@ -1314,6 +1313,7 @@ mod test {
                     &module_types,
                     Tracing::All(TraceLevel::Verbose),
                     &mut warnings,
+                    None,
                 )
                 .expect("Failed to type-check module.");
 
@@ -1328,7 +1328,7 @@ mod test {
                 .last()
                 .expect("No test found in declared src?");
 
-            let mut functions = builtins::prelude_functions(&id_gen);
+            let mut functions = builtins::prelude_functions(&id_gen, &module_types);
             let mut data_types = builtins::prelude_data_types(&id_gen);
             ast.register_definitions(&mut functions, &mut data_types);
 

@@ -1,7 +1,6 @@
 use crate::{
     ast,
-    builtins::{self},
-    tipo::{self, environment::Environment, error::Error},
+    tipo::{self, environment::Environment, error::Error, Type},
 };
 use itertools::Itertools;
 use std::{collections::BTreeMap, iter, ops::Deref};
@@ -381,6 +380,7 @@ pub(crate) enum Pattern {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Literal {
     Int(String),
+    ByteArray(Vec<u8>),
 }
 
 impl Pattern {
@@ -499,8 +499,8 @@ fn pretty_tail(tail: Pattern) -> String {
 }
 
 fn list_constructors() -> Vec<tipo::ValueConstructor> {
-    let list_parameter = builtins::generic_var(0);
-    let list_type = builtins::list(list_parameter);
+    let list_parameter = Type::generic_var(0);
+    let list_type = Type::list(list_parameter);
 
     vec![
         tipo::ValueConstructor {
@@ -536,6 +536,9 @@ pub(super) fn simplify(
 ) -> Result<Pattern, Error> {
     match value {
         ast::Pattern::Int { value, .. } => Ok(Pattern::Literal(Literal::Int(value.clone()))),
+        ast::Pattern::ByteArray { value, .. } => {
+            Ok(Pattern::Literal(Literal::ByteArray(value.clone())))
+        }
         ast::Pattern::Assign { pattern, .. } => simplify(environment, pattern.as_ref()),
         ast::Pattern::List { elements, tail, .. } => {
             let mut p = if let Some(t) = tail {

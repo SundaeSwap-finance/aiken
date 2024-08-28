@@ -1,14 +1,105 @@
 # Changelog
 
-## v1.0.30-alpha - UNRELEASED
+## v1.1.0 - UNRELEASED
 
 ### Added
 
 - **aiken-lang**: also authorize (complete) patterns in function arguments list instead of only variable names. @KtorZ
 
+- **aiken-lang**: new syntax for soft casting otherwise known as `if/is`. See [#959](https://github.com/aiken-lang/aiken/pull/959) or [Control Flow - soft casting](https://aiken-lang.org/language-tour/control-flow#soft-casting-with-ifis) for more details. @rvcas
+
+- **aiken-lang**: optimization: pre-evaluate constant arguments to lambdas when safe to do so. @MicroProofs
+
+- **aiken-lang**: infer type when immediately possible during a patterned type-cast. See [#969](https://github.com/aiken-lang/aiken/pull/979). @KtorZ
+
+- **aiken-lang**: add support for `mk_cons` and `mk_pair_data` builtins. See [#964](https://github.com/aiken-lang/aiken/issues/964). @KtorZ
+
+- **aiken-lang**: pattern-matching on bytearrays is now available. See [#989](https://github.com/aiken-lang/aiken/issues/989). @KtorZ
+
+- **aiken-project**: conditional configuration and environment. See [#937](https://github.com/aiken-lang/aiken/issues/937). @KtorZ
+
+- **aiken-project**: warning on compiler version mismatch. See [de870e2](https://github.com/aiken-lang/aiken/commit/de870e2529eb2336957e228cd30d4850ec2619a2). @rvcas
+
+- **aiken-project**: source links to generated documentation for types, constants and functions. @KtorZ
+
+- **aiken-project**: comments containing Markdown section headings (`#`, `##`, `###` etc.) will now be preserved and rendered in generated documentation. @KtorZ
+
+- **aiken-project**: modules starting with `@hidden` in their docs will be skipped from docs generation. @KtorZ
+
+- **uplc**: support evaluation of Plutus V3 transactions, including new purposes introduced in Conway. @KtorZ
+
 ### Changed
 
+- **aiken-lang**: fix zero-arg builtins `mk_nil_data` and `mk_nil_pair_data` invokation. @KtorZ
+
+- **aiken-lang**: rename some builtins. @KtorZ
+
+  | old name           | new name    |
+  | ---                | ---         |
+  | `mk_nil_data`      | `new_list`  |
+  | `mk_pair_data`     | `new_pair`  |
+  | `mk_nil_pair_data` | `new_pairs` |
+
 - **aiken-lang**: duplicate import lines are now automatically merged instead of raising a warning. However, imports can no longer appear anywhere in the file and must come as the first definitions. @KtorZ
+
+- **aiken-lang**: remove warning on discarded expect, allowing to keep 'side-effects' when necessary. See [#967](https://github.com/aiken-lang/aiken/pull/967). @KtorZ
+
+- **aiken-lang**: allow expect as last (or only) expression in function body, when clauses and if branches. Such expressions unify with `Void`. See [#1000](https://github.com/aiken-lang/aiken/pull/1000). @KtorZ
+
+- **aiken-lang**: allow tests to return `Void`. Tests that return `Void` are treated the same as tests that return `True`. See [#1000](https://github.com/aiken-lang/aiken/pull/1000). @KtorZ
+
+- **aiken-lang**: rework traces to be (1) variadic, (2) generic in its arguments and (3) structured. @KtorZ
+
+  In more details:
+
+  1. Enables the `trace` keyword to take one, two or any argument really separated by comma after the first. For example:
+
+     ```ak
+     trace @"a classic trace"
+
+     // ..
+
+     trace @"condition_1": @"foo"
+
+     // ...
+
+     trace @"condition_2": @"foo", @"bar"
+     ```
+
+  2. Enables the `trace` keyword to not only take strings as arguments; but any
+     data-type that is serialisable (i.e. that can be cast to Data). It is fundamentally identical to calling the [`cbor.diagnostic`](https://aiken-lang.github.io/stdlib/aiken/cbor.html#diagnostic) function from the standard lib; except that this is done and glued with the rest of the trace automatically.
+
+     ```ak
+     trace @"condition_1": [1, 2, 3]
+
+     // ...
+
+     let my_var = Some("foo")
+     trace my_var
+     ```
+
+  3. Changes the behavior of the `--trace-level compact` mode to now:
+
+   - remove trace-if-false (`?` operator) traces entirely in this mode;
+   - only keep the label (first trace argument) and error when it isn't a string.
+
+  See also [#978](https://github.com/aiken-lang/aiken/pull/978).
+
+- **aiken-lang**: rework formatter behaviour on long-lines, especially in the presence of binary operators. @KtorZ
+
+- **aiken-lang**: provide better errors for unknown types used in cyclic type definitions. @KtorZ
+
+- **aiken-project**: fix blueprint's apply truncating last character of outputs. See [#987](https://github.com/aiken-lang/aiken/issues/987). @KtorZ
+
+- **aiken-project**: provide better error (include input ref) when inputs are missing during transaction evaluation. See [#974](https://github.com/aiken-lang/aiken/issues/974). @KtorZ
+
+- **aiken-project**: module inhabitants are no longer alphabetically sorted when generating documentation. Instead, the order in which they are defined in the module is used. @KtorZ
+
+- **aiken-project**: the sidebar links to modules within a package is now fully hierarchical and (hopefully) better-looking. @KtorZ
+
+### Removed
+
+- **aiken-lang**: clause guards are no longer part of the language. See [#886](https://github.com/aiken-lang/aiken/issues/886). @KtorZ.
 
 ## v1.0.29-alpha - 2024-06-06
 

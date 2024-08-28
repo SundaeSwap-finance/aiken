@@ -9,7 +9,7 @@ Schema {
             Var {
                 tipo: RefCell {
                     value: Generic {
-                        id: 35,
+                        id: 64,
                     },
                 },
                 alias: None,
@@ -20,5 +20,6 @@ Schema {
     source_code: NamedSource {
         name: "",
         source: "<redacted>",
+        language: None,
     ,
 }

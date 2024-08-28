@@ -1,6 +1,6 @@
 ---
 source: crates/aiken-project/src/blueprint/validator.rs
-description: "Code:\n\nvalidator {\n  fn generics(redeemer: a, ctx: Void) {\n    True\n  }\n}\n"
+description: "Code:\n\nvalidator generics {\n  mint(redeemer: a, policy_id: ByteArray, transaction: Data) {\n    True\n  }\n}\n"
 ---
 Schema {
     error: Error {
@@ -9,16 +9,17 @@ Schema {
             Var {
                 tipo: RefCell {
                     value: Generic {
-                        id: 35,
+                        id: 64,
                     },
                 },
                 alias: None,
             },
         ],
     },
-    location: 26..37,
+    location: 28..39,
     source_code: NamedSource {
         name: "",
         source: "<redacted>",
+        language: None,
     ,
 }

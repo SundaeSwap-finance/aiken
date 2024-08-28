@@ -46,7 +46,7 @@ impl TestProject {
         module_types.insert("aiken".to_string(), builtins::prelude(&id_gen));
         module_types.insert("aiken/builtin".to_string(), builtins::plutus(&id_gen));
 
-        let functions = builtins::prelude_functions(&id_gen);
+        let functions = builtins::prelude_functions(&id_gen, &module_types);
         let data_types = builtins::prelude_data_types(&id_gen);
 
         TestProject {
@@ -99,6 +99,7 @@ impl TestProject {
                 &self.module_types,
                 Tracing::All(TraceLevel::Verbose),
                 &mut warnings,
+                None,
             )
             .expect("Failed to type-check module");
 

@@ -81,6 +81,7 @@ pub enum Air {
     },
     Fn {
         params: Vec<String>,
+        allow_inline: bool,
     },
     Builtin {
         count: usize,
@@ -100,9 +101,13 @@ pub enum Air {
     Let {
         name: String,
     },
+    SoftCastLet {
+        name: String,
+        tipo: Rc<Type>,
+    },
     CastFromData {
         tipo: Rc<Type>,
-        is_expect: bool,
+        full_cast: bool,
     },
     CastToData {
         tipo: Rc<Type>,
@@ -223,4 +228,8 @@ pub enum Air {
     NoOp,
     FieldsEmpty,
     ListEmpty,
+    MultiValidator {
+        two_arg_name: String,
+        three_arg_name: String,
+    },
 }

@@ -1,9 +1,9 @@
 ---
 source: crates/aiken-project/src/blueprint/validator.rs
-description: "Code:\n\n/// On-chain state\ntype State {\n    /// The contestation period as a number of seconds\n    contestationPeriod: ContestationPeriod,\n    /// List of public key hashes of all participants\n    parties: List<Party>,\n    utxoHash: Hash<Blake2b_256>,\n}\n\n/// A Hash digest for a given algorithm.\ntype Hash<alg> = ByteArray\n\ntype Blake2b_256 { Blake2b_256 }\n\n/// Whatever\ntype ContestationPeriod {\n  /// A positive, non-zero number of seconds.\n  ContestationPeriod(Int)\n}\n\ntype Party =\n  ByteArray\n\ntype Input {\n    CollectCom\n    Close\n    /// Abort a transaction\n    Abort\n}\n\nvalidator {\n  fn simplified_hydra(datum: State, redeemer: Input, ctx: Data) {\n    True\n  }\n}\n"
+description: "Code:\n\n/// On-chain state\npub type State {\n    /// The contestation period as a number of seconds\n    contestationPeriod: ContestationPeriod,\n    /// List of public key hashes of all participants\n    parties: List<Party>,\n    utxoHash: Hash<Blake2b_256>,\n}\n\n/// A Hash digest for a given algorithm.\npub type Hash<alg> = ByteArray\n\npub type Blake2b_256 { Blake2b_256 }\n\n/// Whatever\npub type ContestationPeriod {\n  /// A positive, non-zero number of seconds.\n  ContestationPeriod(Int)\n}\n\npub type Party =\n  ByteArray\n\npub type Input {\n    CollectCom\n    Close\n    /// Abort a transaction\n    Abort\n}\n\nvalidator simplified_hydra {\n  spend(datum: Option<State>, redeemer: Input, output_reference: Data, transaction: Data) {\n    True\n  }\n}\n"
 ---
 {
-  "title": "test_module.simplified_hydra",
+  "title": "test_module.simplified_hydra.spend",
   "datum": {
     "title": "datum",
     "schema": {
@@ -16,8 +16,8 @@ description: "Code:\n\n/// On-chain state\ntype State {\n    /// The contestatio
       "$ref": "#/definitions/test_module~1Input"
     }
   },
-  "compiledCode": "5902710100003232323232323232323223232232253330094a22930a998052491856616c696461746f722072657475726e65642066616c736500136563232533300930050011533300d300c37540042930a998050038b0a99980499b874800800454ccc034c030dd50010a4c2a6601400e2c2a66601266e1d20040011533300d300c37540042930a998050038b0a998050038b18051baa001533333300e0011001153300800516153300800516153300800516153300800516325333006300230083754002264a6660160022a6601000c2c26464a66601a0022a660140102c26464a66601e0022a660180142c264a6660206024004264649319198008008029129998098008a4c26466006006602c00464a66666602e0022a6602201e2c2a6602201e2c2a6602201e2c2a6602201e2c26eb8004c0500054ccc030c020c038dd500289929998088008a998070060b0992999809180a0010a4c2a6601e01a2c64a66666602a0022a6601e01a2c2a6601e01a2c2a6601e01a2c26eb400454cc03c03458c048004c03cdd50028a998068058b0a998068058b1929999998098008a998068058b0a998068058b0a998068058b0a998068058b09bae00130100013010002325333333011001153300b00916153300b00916137580022a660160122c2a660160122c601c002601c00464a66666601e00220022a6601200e2c2a6601200e2c2a6601200e2c2a6601200e2c601800260126ea800454cc01c014594cccccc030008400854cc0180105854cc0180105854cc0180105854cc01801058dc3a40009210f72656465656d65723a20496e7075740049010c646174756d3a205374617465005734ae7155ceaab9e5573eae855d12ba41",
-  "hash": "a35efe623ea7738b61a9f152e14a9abc30c15f0ceff540b66e42c406",
+  "compiledCode": "<redacted>",
+  "hash": "<redacted>",
   "definitions": {
     "ByteArray": {
       "dataType": "bytes"

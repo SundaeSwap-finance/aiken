@@ -1,21 +1,21 @@
-use crate::{
+pub(crate) use crate::{
     ast::{
-        self, Annotation, ArgBy, ArgName, AssignmentPattern, BinOp, Bls12_381Point,
+        self, Annotation, ArgBy, ArgName, AssignmentKind, AssignmentPattern, BinOp, Bls12_381Point,
         ByteArrayFormatPreference, CallArg, Curve, DataType, DataTypeKey, DefinitionLocation,
-        IfBranch, Located, LogicalOpChainKind, ParsedCallArg, Pattern, RecordConstructorArg,
+        Located, LogicalOpChainKind, ParsedCallArg, Pattern, RecordConstructorArg,
         RecordUpdateSpread, Span, TraceKind, TypedArg, TypedAssignmentKind, TypedClause,
-        TypedDataType, TypedRecordUpdateArg, UnOp, UntypedArg, UntypedAssignmentKind,
-        UntypedClause, UntypedRecordUpdateArg,
+        TypedDataType, TypedIfBranch, TypedPattern, TypedRecordUpdateArg, UnOp, UntypedArg,
+        UntypedAssignmentKind, UntypedClause, UntypedIfBranch, UntypedRecordUpdateArg,
     },
-    builtins::void,
     parser::token::Base,
     tipo::{
         check_replaceable_opaque_type, convert_opaque_type, lookup_data_type_by_tipo,
         ModuleValueConstructor, PatternConstructor, Type, TypeVar, ValueConstructor,
+        ValueConstructorVariant,
     },
 };
 use indexmap::IndexMap;
-use pallas::ledger::primitives::alonzo::{Constr, PlutusData};
+use pallas_primitives::alonzo::{Constr, PlutusData};
 use std::{fmt::Debug, rc::Rc};
 use uplc::{
     ast::Data,
@@ -127,7 +127,7 @@ pub enum TypedExpr {
     If {
         location: Span,
         #[serde(with = "Vec1Ref")]
-        branches: Vec1<IfBranch<Self>>,
+        branches: Vec1<TypedIfBranch>,
         final_else: Box<Self>,
         tipo: Rc<Type>,
     },
@@ -200,6 +200,52 @@ impl<T> From<Vec1Ref<T>> for Vec1<T> {
 }
 
 impl TypedExpr {
+    pub fn sequence(exprs: &[TypedExpr]) -> Self {
+        TypedExpr::Sequence {
+            location: Span::empty(),
+            expressions: exprs.to_vec(),
+        }
+    }
+
+    pub fn let_(value: Self, pattern: TypedPattern, tipo: Rc<Type>) -> Self {
+        TypedExpr::Assignment {
+            location: Span::empty(),
+            tipo: tipo.clone(),
+            value: value.into(),
+            pattern,
+            kind: AssignmentKind::let_(),
+        }
+    }
+
+    // Create an expect assignment, unless the target type is `Data`; then fallback to a let.
+    pub fn flexible_expect(value: Self, pattern: TypedPattern, tipo: Rc<Type>) -> Self {
+        TypedExpr::Assignment {
+            location: Span::empty(),
+            tipo: tipo.clone(),
+            value: value.into(),
+            pattern,
+            kind: if tipo.is_data() {
+                AssignmentKind::let_()
+            } else {
+                AssignmentKind::expect()
+            },
+        }
+    }
+
+    pub fn local_var(name: &str, tipo: Rc<Type>) -> Self {
+        TypedExpr::Var {
+            location: Span::empty(),
+            constructor: ValueConstructor {
+                public: true,
+                variant: ValueConstructorVariant::LocalVariable {
+                    location: Span::empty(),
+                },
+                tipo: tipo.clone(),
+            },
+            name: name.to_string(),
+        }
+    }
+
     pub fn tipo(&self) -> Rc<Type> {
         match self {
             Self::Var { constructor, .. } => constructor.tipo.clone(),
@@ -223,9 +269,10 @@ impl TypedExpr {
             | Self::RecordAccess { tipo, .. }
             | Self::RecordUpdate { tipo, .. }
             | Self::CurvePoint { tipo, .. } => tipo.clone(),
-            Self::Pipeline { expressions, .. } | Self::Sequence { expressions, .. } => {
-                expressions.last().map(TypedExpr::tipo).unwrap_or_else(void)
-            }
+            Self::Pipeline { expressions, .. } | Self::Sequence { expressions, .. } => expressions
+                .last()
+                .map(TypedExpr::tipo)
+                .unwrap_or_else(Type::void),
         }
     }
 
@@ -238,6 +285,10 @@ impl TypedExpr {
                 | Self::String { .. }
                 | Self::ByteArray { .. }
         )
+    }
+
+    pub fn is_error_term(&self) -> bool {
+        matches!(self, Self::ErrorTerm { .. })
     }
 
     /// Returns `true` if the typed expr is [`Assignment`].
@@ -377,8 +428,20 @@ impl TypedExpr {
                 expressions.iter().find_map(|e| e.find_node(byte_index))
             }
 
-            TypedExpr::Fn { body, .. } => body
-                .find_node(byte_index)
+            TypedExpr::Fn {
+                body,
+                args,
+                return_annotation,
+                ..
+            } => args
+                .iter()
+                .find_map(|arg| arg.find_node(byte_index))
+                .or_else(|| body.find_node(byte_index))
+                .or_else(|| {
+                    return_annotation
+                        .as_ref()
+                        .and_then(|a| a.find_node(byte_index))
+                })
                 .or(Some(Located::Expression(self))),
 
             TypedExpr::Tuple {
@@ -458,6 +521,25 @@ impl TypedExpr {
             TypedExpr::UnOp { value, .. } => value
                 .find_node(byte_index)
                 .or(Some(Located::Expression(self))),
+        }
+    }
+
+    pub fn void(location: Span) -> Self {
+        TypedExpr::Var {
+            name: "Void".to_string(),
+            constructor: ValueConstructor {
+                public: true,
+                variant: ValueConstructorVariant::Record {
+                    name: "Void".to_string(),
+                    arity: 0,
+                    field_map: None,
+                    location: Span::empty(),
+                    module: String::new(),
+                    constructors_count: 1,
+                },
+                tipo: Type::void(),
+            },
+            location,
         }
     }
 }
@@ -548,7 +630,8 @@ pub enum UntypedExpr {
         kind: TraceKind,
         location: Span,
         then: Box<Self>,
-        text: Box<Self>,
+        label: Box<Self>,
+        arguments: Vec<Self>,
     },
 
     TraceIfFalse {
@@ -564,7 +647,7 @@ pub enum UntypedExpr {
 
     If {
         location: Span,
-        branches: Vec1<IfBranch<Self>>,
+        branches: Vec1<UntypedIfBranch>,
         final_else: Box<Self>,
     },
 
@@ -1134,10 +1217,11 @@ impl UntypedExpr {
             location,
             kind: TraceKind::Todo,
             then: Box::new(UntypedExpr::ErrorTerm { location }),
-            text: Box::new(reason.unwrap_or_else(|| UntypedExpr::String {
+            label: Box::new(reason.unwrap_or_else(|| UntypedExpr::String {
                 location,
                 value: DEFAULT_TODO_STR.to_string(),
             })),
+            arguments: Vec::new(),
         }
     }
 
@@ -1147,7 +1231,8 @@ impl UntypedExpr {
                 location,
                 kind: TraceKind::Error,
                 then: Box::new(UntypedExpr::ErrorTerm { location }),
-                text: Box::new(reason),
+                label: Box::new(reason),
+                arguments: Vec::new(),
             }
         } else {
             UntypedExpr::ErrorTerm { location }
@@ -1337,15 +1422,27 @@ impl UntypedExpr {
         match self {
             Self::BinOp { name, .. } => name.precedence(),
             Self::PipeLine { .. } => 0,
-            _ => std::u8::MAX,
+            _ => u8::MAX,
         }
     }
 
-    pub fn is_simple_constant(&self) -> bool {
-        matches!(
-            self,
-            Self::String { .. } | Self::UInt { .. } | Self::ByteArray { .. }
-        )
+    /// Returns true when an UntypedExpr can be displayed in a flex-break manner (i.e. tries to fit as
+    /// much as possible on a single line). When false, long lines with several of those patterns
+    /// will be broken down to one expr per line.
+    pub fn is_simple_expr_to_format(&self) -> bool {
+        match self {
+            Self::String { .. } | Self::UInt { .. } | Self::ByteArray { .. } | Self::Var { .. } => {
+                true
+            }
+            Self::Pair { fst, snd, .. } => {
+                fst.is_simple_expr_to_format() && snd.is_simple_expr_to_format()
+            }
+            Self::Tuple { elems, .. } => elems.iter().all(|e| e.is_simple_expr_to_format()),
+            Self::List { elements, .. } if elements.len() <= 3 => {
+                elements.iter().all(|e| e.is_simple_expr_to_format())
+            }
+            _ => false,
+        }
     }
 
     pub fn lambda(

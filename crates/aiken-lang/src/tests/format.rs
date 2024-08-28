@@ -87,6 +87,43 @@ fn format_if() {
 }
 
 #[test]
+fn format_if_soft_cast() {
+    assert_format!(
+        r#"
+        pub fn foo(a) {
+          if a is Option<Int> { 14 } else { 42 }
+          }
+    "#
+    );
+}
+
+#[test]
+fn format_if_soft_cast_pattern() {
+    assert_format!(
+        r#"
+        pub fn foo(a) {
+          if a is Some(x): Option<Int> { 14 } else if b is Foo { b } else { 42 }
+          }
+    "#
+    );
+}
+
+#[test]
+fn format_if_soft_cast_record() {
+    assert_format!(
+        r#"
+        pub fn foo(foo: Data) -> Int {
+          if foo is Foo { a }: Foo {
+            a
+          } else {
+            0
+          }
+        }
+        "#
+    );
+}
+
+#[test]
 fn format_logic_op_with_code_block() {
     assert_format!(
         r#"
@@ -161,18 +198,18 @@ fn format_preserve_newline_after_bool_expect() {
 fn format_validator() {
     assert_format!(
         r#"
-      validator ( ) {
+      validator thing ( ) {
       // What is the purpose of life
 
-      fn foo (d: Datum, r: Redeemer, ctx: ScriptContext) -> Bool {
+      spend(d: Datum, r: Redeemer, ctx: ScriptContext) -> Bool {
       True
       }
       }
 
       // What?
-      validator {
+      validator foo {
         /// Some documentation for foo
-        fn foo() {
+        foo() {
           Void
         }
 
@@ -186,12 +223,12 @@ fn format_validator() {
 fn format_double_validator() {
     assert_format!(
         r#"
-        validator ( param1 : ByteArray ) {
-        fn foo (d: Datum, r: Redeemer, ctx: ScriptContext) -> Bool {
+        validator foo( param1 : ByteArray ) {
+        spend(d: Datum, r: Redeemer, ctx: ScriptContext) -> Bool {
         True
         }
         /// This is bar
-    fn bar(r: Redeemer, ctx    : ScriptContext  )   ->   Bool { True }
+    mint(r: Redeemer, ctx    : ScriptContext  )   ->   Bool { True }
         }
     "#
     );
@@ -201,12 +238,12 @@ fn format_double_validator() {
 fn format_double_validator_public() {
     assert_format!(
         r#"
-        validator ( param1 : ByteArray ) {
-        pub fn foo (d: Datum, r: Redeemer, ctx: ScriptContext) -> Bool {
+        validator foo ( param1 : ByteArray ) {
+        spend(d: Datum, r: Redeemer, ctx: ScriptContext) -> Bool {
         True
         }
         /// This is bar
-    pub fn bar(r: Redeemer, ctx    : ScriptContext  )   ->   Bool { True }
+    mint(r: Redeemer, ctx    : ScriptContext  )   ->   Bool { True }
         }
     "#
     );
@@ -930,21 +967,283 @@ fn format_anon_fn_pattern() {
 fn format_validator_pattern() {
     assert_format!(
         r#"
-        validator(Foo { a, b, .. }) {
-            fn foo() { todo }
+        validator foo(Foo { a, b, .. }) {
+            spend() { todo }
         }
 
-        validator([Bar] : List<Bar>) {
-            fn bar() { todo }
+        validator foo([Bar] : List<Bar>) {
+            spend() { todo }
         }
 
-        validator((Baz, Baz) as x) {
-            fn baz() { todo }
+        validator foo((Baz, Baz) as x) {
+            mint() { todo }
         }
 
-        validator((fst, snd) as x: Pair<Int, Int>) {
-            fn fiz() { todo }
+        validator fiz((fst, snd) as x: Pair<Int, Int>) {
+            spend() { todo }
         }
+        "#
+    );
+}
+
+#[test]
+fn format_variadic_trace() {
+    assert_format!(
+        r#"
+        fn foo() {
+            trace @"foo": @"bar"
+            trace "foo": "bar"
+            trace @"foo": "bar", @"baz"
+            trace bar: @"baz"
+            Void
+        }
+        "#
+    );
+}
+
+#[test]
+fn format_pattern_bytearray() {
+    assert_format!(
+        r#"
+        fn main(foo) {
+            when foo is {
+                "Aiken, rocks!" -> True
+                #"00abcd" -> True
+                #[1, 2, 3, 4] -> True
+                #[0x00, 0xab, 0xcd] -> True
+                _ -> False
+            }
+        }
+        "#
+    );
+}
+
+#[test]
+fn format_long_bin_op_1() {
+    assert_format!(
+        r#"
+        test foo() {
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] == [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        }
+        "#
+    );
+}
+
+#[test]
+fn format_long_bin_op_2() {
+    assert_format!(
+        r#"
+        test foo() {
+            [0, 0, 0] == [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        }
+        "#
+    );
+}
+
+#[test]
+fn format_long_bin_op_3() {
+    assert_format!(
+        r#"
+        test foo() {
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] == [0, 0, 0]
+        }
+        "#
+    );
+}
+
+#[test]
+fn format_long_bin_op_4() {
+    assert_format!(
+        r#"
+        test foo() {
+            [foo, bar, baz, (2, 3), (4, 5), (6, 7), (8, 9), biz, buz, fizz, fuzz, alice, bob, carole, i, am, out, of, names] == [0, 0, 0]
+        }
+        "#
+    );
+}
+
+#[test]
+fn format_long_pattern_1() {
+    assert_format!(
+        r#"
+        test foo() {
+            when x is {
+                [True, False, True, False, True, False, True, False, True, False, True, False, True, False, True, False, ..] -> todo
+                _ -> todo
+            }
+        }
+        "#
+    );
+}
+
+#[test]
+fn format_long_pattern_2() {
+    assert_format!(
+        r#"
+        test foo() {
+            when x is {
+                [(1, 2, 3), (4, 5, 6), (7, 8, 9), (10, 11, 12), (13, 14, 15), (16, 17, 18), (19, 20, 21), (22, 23, 24)] -> todo
+                _ -> todo
+            }
+        }
+        "#
+    );
+}
+
+#[test]
+fn format_long_standalone_literal() {
+    assert_format!(
+        r#"
+        test foo() {
+          let left =
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+          let right =
+            [
+              0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+              0, 0, 0, 0,
+            ]
+          left == right
+        }
+        "#
+    );
+}
+
+#[test]
+fn format_long_imports() {
+    assert_format!(
+        r#"
+        use aiken/list.{foldr, foldl, is_empty, filter, map, find, any, all, flat_map, partition, push, reduce, reverse, repeat}
+        "#
+    );
+}
+
+#[test]
+fn format_long_pair() {
+    assert_format!(
+        r#"
+        test foo() {
+            expect(Some([
+                Pair(GovernanceActionId { transaction: only7s, proposal_procedure: 2 },
+                Abstain),
+            ])) == whatever
+
+            expect(Some([
+                Foo(GovernanceActionId { transaction: only7s, proposal_procedure: 2 },
+                Abstain),
+            ])) == whatever
+
+            expect(Some([
+                (GovernanceActionId { transaction: only7s, proposal_procedure: 2 },
+                Abstain),
+            ])) == whatever
+        }
+        "#
+    );
+}
+
+#[test]
+fn format_validator_exhaustive_handlers() {
+    assert_format!(
+        r#"
+            validator foo {
+              mint(_redeemer, _policy_id, _self) {
+                True
+              }
+
+              spend(_datum, _redeemer, _policy_id, _self) {
+                True
+              }
+
+              withdraw(_redeemer, _account, _self) {
+                True
+              }
+
+              publish(_redeemer, _certificate, _self) {
+                True
+              }
+
+              vote(_redeemer, _voter, _self) {
+                True
+              }
+
+              propose(_redeemer, _proposal, _self) {
+                True
+              }
+            }
+        "#
+    );
+}
+
+#[test]
+fn format_validator_exhaustive_handlers_extra_default_fallback() {
+    assert_format!(
+        r#"
+            validator foo {
+              mint(_redeemer, _policy_id, _self) {
+                True
+              }
+
+              spend(_datum, _redeemer, _policy_id, _self) {
+                True
+              }
+
+              withdraw(_redeemer, _account, _self) {
+                True
+              }
+
+              publish(_redeemer, _certificate, _self) {
+                True
+              }
+
+              vote(_redeemer, _voter, _self) {
+                True
+              }
+
+              propose(_redeemer, _proposal, _self) {
+                True
+              }
+
+              else(_) {
+                fail
+              }
+            }
+        "#
+    );
+}
+
+#[test]
+fn format_validator_exhaustive_handlers_extra_non_default_fallback() {
+    assert_format!(
+        r#"
+            validator foo {
+              mint(_redeemer, _policy_id, _self) {
+                True
+              }
+
+              spend(_datum, _redeemer, _policy_id, _self) {
+                True
+              }
+
+              withdraw(_redeemer, _account, _self) {
+                True
+              }
+
+              publish(_redeemer, _certificate, _self) {
+                True
+              }
+
+              vote(_redeemer, _voter, _self) {
+                True
+              }
+
+              propose(_redeemer, _proposal, _self) {
+                True
+              }
+
+              else(_) {
+                True
+              }
+            }
         "#
     );
 }
