@@ -6,11 +6,13 @@ pub mod cost_model;
 pub mod discharge;
 mod error;
 pub mod eval_result;
+pub mod indexed_term;
 pub mod runtime;
 pub mod value;
 
 use cost_model::{ExBudget, StepKind};
 pub use error::Error;
+use indexed_term::IndexedTerm;
 use pallas_primitives::conway::Language;
 
 use self::{
@@ -22,24 +24,24 @@ use self::{
 #[derive(Clone)]
 pub enum MachineState {
     Return(Context, Value),
-    Compute(Context, Env, Term<NamedDeBruijn>),
-    Done(Term<NamedDeBruijn>),
+    Compute(Context, Env, IndexedTerm<NamedDeBruijn>),
+    Done(IndexedTerm<NamedDeBruijn>),
 }
 
 #[derive(Clone, Debug)]
 pub enum Context {
     FrameAwaitArg(Value, Box<Context>),
-    FrameAwaitFunTerm(Env, Term<NamedDeBruijn>, Box<Context>),
+    FrameAwaitFunTerm(Env, IndexedTerm<NamedDeBruijn>, Box<Context>),
     FrameAwaitFunValue(Value, Box<Context>),
     FrameForce(Box<Context>),
     FrameConstr(
         Env,
         usize,
-        Vec<Term<NamedDeBruijn>>,
+        Vec<IndexedTerm<NamedDeBruijn>>,
         Vec<Value>,
         Box<Context>,
     ),
-    FrameCases(Env, Vec<Term<NamedDeBruijn>>, Box<Context>),
+    FrameCases(Env, Vec<IndexedTerm<NamedDeBruijn>>, Box<Context>),
     NoFrame,
 }
 
@@ -75,7 +77,7 @@ impl Machine {
         loop {
             state = self.step(state)?;
             if let Done(t) = state {
-                return Ok(t);
+                return Ok((&t).into());
             }
         }
     }
@@ -103,7 +105,7 @@ impl Machine {
         Ok(MachineState::Compute(
             Context::NoFrame,
             Rc::new(vec![]),
-            term,
+            IndexedTerm::from(term),
         ))
     }
 
@@ -111,37 +113,40 @@ impl Machine {
         &mut self,
         context: Context,
         env: Env,
-        term: Term<NamedDeBruijn>,
+        term: IndexedTerm<NamedDeBruijn>,
     ) -> Result<MachineState, Error> {
         match term {
-            Term::Var(name) => {
+            IndexedTerm::Var { name, .. } => {
                 self.step_and_maybe_spend(StepKind::Var)?;
 
                 let val = self.lookup_var(name.as_ref(), &env)?;
 
                 Ok(MachineState::Return(context, val))
             }
-            Term::Delay(body) => {
+            IndexedTerm::Delay { then, .. } => {
                 self.step_and_maybe_spend(StepKind::Delay)?;
 
-                Ok(MachineState::Return(context, Value::Delay(body, env)))
+                Ok(MachineState::Return(context, Value::Delay(then, env)))
             }
-            Term::Lambda {
+            IndexedTerm::Lambda {
                 parameter_name,
                 body,
+                ..
             } => {
                 self.step_and_maybe_spend(StepKind::Lambda)?;
 
                 Ok(MachineState::Return(
                     context,
                     Value::Lambda {
-                        parameter_name,
-                        body,
+                        parameter_name: parameter_name.clone(),
+                        body: body.clone(),
                         env,
                     },
                 ))
             }
-            Term::Apply { function, argument } => {
+            IndexedTerm::Apply {
+                function, argument, ..
+            } => {
                 self.step_and_maybe_spend(StepKind::Apply)?;
 
                 Ok(MachineState::Compute(
@@ -154,32 +159,34 @@ impl Machine {
                     function.as_ref().clone(),
                 ))
             }
-            Term::Constant(x) => {
+            IndexedTerm::Constant { value, .. } => {
                 self.step_and_maybe_spend(StepKind::Constant)?;
 
-                Ok(MachineState::Return(context, Value::Con(x)))
+                Ok(MachineState::Return(context, Value::Con(value)))
             }
-            Term::Force(body) => {
+            IndexedTerm::Force { then, .. } => {
                 self.step_and_maybe_spend(StepKind::Force)?;
 
                 Ok(MachineState::Compute(
                     Context::FrameForce(context.into()),
                     env,
-                    body.as_ref().clone(),
+                    then.as_ref().clone(),
                 ))
             }
-            Term::Error => Err(Error::EvaluationFailure),
-            Term::Builtin(fun) => {
+            IndexedTerm::Error { .. } => Err(Error::EvaluationFailure),
+            IndexedTerm::Builtin { func, .. } => {
                 self.step_and_maybe_spend(StepKind::Builtin)?;
 
-                let runtime: BuiltinRuntime = fun.into();
+                let runtime: BuiltinRuntime = func.into();
 
                 Ok(MachineState::Return(
                     context,
-                    Value::Builtin { fun, runtime },
+                    Value::Builtin { fun: func, runtime },
                 ))
             }
-            Term::Constr { tag, mut fields } => {
+            IndexedTerm::Constr {
+                tag, mut fields, ..
+            } => {
                 self.step_and_maybe_spend(StepKind::Constr)?;
 
                 fields.reverse();
@@ -202,7 +209,9 @@ impl Machine {
                     ))
                 }
             }
-            Term::Case { constr, branches } => {
+            IndexedTerm::Case {
+                constr, branches, ..
+            } => {
                 self.step_and_maybe_spend(StepKind::Case)?;
 
                 Ok(MachineState::Compute(
@@ -349,7 +358,12 @@ impl Machine {
     fn lookup_var(&mut self, name: &NamedDeBruijn, env: &[Value]) -> Result<Value, Error> {
         env.get::<usize>(env.len() - usize::from(name.index))
             .cloned()
-            .ok_or_else(|| Error::OpenTermEvaluated(Term::Var(name.clone().into())))
+            .ok_or_else(|| {
+                Error::OpenTermEvaluated(IndexedTerm::Var {
+                    index: None,
+                    name: name.clone().into(),
+                })
+            })
     }
 
     fn step_and_maybe_spend(&mut self, step: StepKind) -> Result<(), Error> {

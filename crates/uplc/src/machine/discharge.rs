@@ -1,12 +1,18 @@
-use crate::ast::{NamedDeBruijn, Term};
+use crate::ast::NamedDeBruijn;
 
-use super::value::{Env, Value};
+use super::{
+    indexed_term::IndexedTerm,
+    value::{Env, Value},
+};
 
-pub fn value_as_term(value: Value) -> Term<NamedDeBruijn> {
+pub fn value_as_term(value: Value) -> IndexedTerm<NamedDeBruijn> {
     match value {
-        Value::Con(x) => Term::Constant(x),
+        Value::Con(value) => IndexedTerm::Constant { index: None, value },
         Value::Builtin { runtime, fun } => {
-            let mut term = Term::Builtin(fun);
+            let mut term = IndexedTerm::Builtin {
+                index: None,
+                func: fun,
+            };
 
             for _ in 0..runtime.forces {
                 term = term.force();
@@ -18,7 +24,14 @@ pub fn value_as_term(value: Value) -> Term<NamedDeBruijn> {
 
             term
         }
-        Value::Delay(body, env) => with_env(0, env, Term::Delay(body)),
+        Value::Delay(body, env) => with_env(
+            0,
+            env,
+            IndexedTerm::Delay {
+                index: None,
+                then: body,
+            },
+        ),
         Value::Lambda {
             parameter_name,
             body,
@@ -26,7 +39,8 @@ pub fn value_as_term(value: Value) -> Term<NamedDeBruijn> {
         } => with_env(
             0,
             env,
-            Term::Lambda {
+            IndexedTerm::Lambda {
+                index: None,
                 parameter_name: NamedDeBruijn {
                     text: parameter_name.text.clone(),
                     index: 0.into(),
@@ -35,56 +49,74 @@ pub fn value_as_term(value: Value) -> Term<NamedDeBruijn> {
                 body,
             },
         ),
-        Value::Constr { tag, fields } => Term::Constr {
+        Value::Constr { tag, fields } => IndexedTerm::Constr {
+            index: None,
             tag,
             fields: fields.into_iter().map(value_as_term).collect(),
         },
     }
 }
 
-fn with_env(lam_cnt: usize, env: Env, term: Term<NamedDeBruijn>) -> Term<NamedDeBruijn> {
+fn with_env(
+    lam_cnt: usize,
+    env: Env,
+    term: IndexedTerm<NamedDeBruijn>,
+) -> IndexedTerm<NamedDeBruijn> {
     match term {
-        Term::Var(name) => {
-            let index: usize = name.index.into();
+        IndexedTerm::Var { index, name } => {
+            let idx: usize = name.index.into();
 
-            if lam_cnt >= index {
-                Term::Var(name)
+            if lam_cnt >= idx {
+                IndexedTerm::Var { index, name }
             } else {
-                env.get::<usize>(env.len() - (index - lam_cnt))
+                env.get::<usize>(env.len() - (idx - lam_cnt))
                     .cloned()
-                    .map_or(Term::Var(name), value_as_term)
+                    .map_or(IndexedTerm::Var { index, name }, value_as_term)
             }
         }
-        Term::Lambda {
+        IndexedTerm::Lambda {
+            index,
             parameter_name,
             body,
         } => {
             let body = with_env(lam_cnt + 1, env, body.as_ref().clone());
 
-            Term::Lambda {
+            IndexedTerm::Lambda {
+                index,
                 parameter_name,
                 body: body.into(),
             }
         }
-        Term::Apply { function, argument } => {
+        IndexedTerm::Apply {
+            index,
+            function,
+            argument,
+        } => {
             let function = with_env(lam_cnt, env.clone(), function.as_ref().clone());
             let argument = with_env(lam_cnt, env, argument.as_ref().clone());
 
-            Term::Apply {
+            IndexedTerm::Apply {
+                index,
                 function: function.into(),
                 argument: argument.into(),
             }
         }
 
-        Term::Delay(x) => {
-            let delay = with_env(lam_cnt, env, x.as_ref().clone());
+        IndexedTerm::Delay { index, then } => {
+            let then = with_env(lam_cnt, env, then.as_ref().clone());
 
-            Term::Delay(delay.into())
+            IndexedTerm::Delay {
+                index,
+                then: then.into(),
+            }
         }
-        Term::Force(x) => {
-            let force = with_env(lam_cnt, env, x.as_ref().clone());
+        IndexedTerm::Force { index, then } => {
+            let then = with_env(lam_cnt, env, then.as_ref().clone());
 
-            Term::Force(force.into())
+            IndexedTerm::Force {
+                index,
+                then: then.into(),
+            }
         }
         rest => rest,
     }
