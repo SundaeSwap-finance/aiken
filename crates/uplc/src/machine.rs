@@ -89,7 +89,7 @@ impl Machine {
                 return Ok(Done(t));
             }
         };
-        return Ok(state);
+        Ok(state)
     }
 
     pub fn get_initial_machine_state(
@@ -100,11 +100,11 @@ impl Machine {
 
         self.spend_budget(startup_budget)?;
 
-        return Ok(MachineState::Compute(
+        Ok(MachineState::Compute(
             Context::NoFrame,
             Rc::new(vec![]),
             term,
-        ));
+        ))
     }
 
     fn compute(

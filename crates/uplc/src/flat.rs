@@ -876,7 +876,7 @@ impl<'b> Binder<'b> for NamedDeBruijn {
     }
 
     fn text(&self) -> String {
-        format!("{}", &self.text) // Temporary hack, until we have a solution to pretty print just the names
+        self.text.to_string() // Temporary hack, until we have a solution to pretty print just the names
     }
 }
 
