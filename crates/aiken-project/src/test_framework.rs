@@ -93,6 +93,7 @@ mod test {
             utils::indexmap::as_str_ref_values(&module_types),
             utils::indexmap::as_str_ref_values(&module_sources),
             Tracing::All(TraceLevel::Verbose),
+            false,
         );
 
         (

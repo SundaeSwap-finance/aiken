@@ -72,8 +72,9 @@ pub struct CodeGenerator<'a> {
     data_types: IndexMap<&'a DataTypeKey, &'a TypedDataType>,
     module_types: IndexMap<&'a str, &'a TypeInfo>,
     module_src: IndexMap<&'a str, &'a (String, LineNumbers)>,
-    /// immutable option
+    /// immutable options
     tracing: TraceLevel,
+    source_maps: bool,
     /// mutable index maps that are reset
     defined_functions: IndexMap<FunctionAccessKey, ()>,
     special_functions: CodeGenSpecialFuncs,
@@ -90,6 +91,7 @@ impl<'a> CodeGenerator<'a> {
         &self.data_types
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         plutus_version: PlutusVersion,
         functions: IndexMap<&'a FunctionAccessKey, &'a TypedFunction>,
@@ -98,6 +100,7 @@ impl<'a> CodeGenerator<'a> {
         module_types: IndexMap<&'a str, &'a TypeInfo>,
         module_src: IndexMap<&'a str, &'a (String, LineNumbers)>,
         tracing: Tracing,
+        source_maps: bool,
     ) -> Self {
         CodeGenerator {
             plutus_version,
@@ -107,6 +110,7 @@ impl<'a> CodeGenerator<'a> {
             module_types,
             module_src,
             tracing: tracing.trace_level(true),
+            source_maps,
             defined_functions: IndexMap::new(),
             special_functions: CodeGenSpecialFuncs::new(),
             code_gen_functions: IndexMap::new(),
@@ -230,6 +234,38 @@ impl<'a> CodeGenerator<'a> {
     }
 
     fn build(
+        &mut self,
+        body: &TypedExpr,
+        module_build_name: &str,
+        context: &[TypedExpr],
+    ) -> AirTree {
+        let inner = self.do_build(body, module_build_name, context);
+        if !self.source_maps {
+            return inner;
+        }
+        let location = Some(body.location());
+        /*
+        let location = match body {
+            TypedExpr::Assignment { location, .. } => Some(location),
+            TypedExpr::BinOp { location, ..} => Some(location),
+            TypedExpr::Call { location, .. } => Some(location),
+            _ => None,
+        };
+         */
+        if let Some(location) = location.filter(|l| *l != Span::empty()) {
+            let line_column =
+                get_line_columns_by_span(module_build_name, &location, &self.module_src);
+            let msg = AirTree::string(format!(
+                "__sourcemap {}.ak:{}:{}",
+                module_build_name, line_column.line, line_column.column
+            ));
+            AirTree::trace(msg, inner.return_type(), inner)
+        } else {
+            inner
+        }
+    }
+
+    fn do_build(
         &mut self,
         body: &TypedExpr,
         module_build_name: &str,
