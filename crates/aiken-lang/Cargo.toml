@@ -1,7 +1,7 @@
 [package]
 name = "aiken-lang"
 description = "The Aiken compiler"
-version = "1.0.31-alpha"
+version = "1.1.2"
 edition = "2021"
 repository = "https://github.com/aiken-lang/aiken"
 homepage = "https://github.com/aiken-lang/aiken"
@@ -12,9 +12,11 @@ authors = [
     "KtorZ <matthias.benkort@gmail.com>",
 ]
 rust-version = "1.66.1"
+build = "build.rs"
 
 [dependencies]
 blst = "0.3.11"
+cryptoxide = "0.4.4"
 hex = "0.4.3"
 indexmap = "1.9.2"
 indoc = "2.0.1"
@@ -24,11 +26,12 @@ num-bigint = "0.4.3"
 ordinal = "0.3.2"
 owo-colors = { version = "3.5.0", features = ["supports-colors"] }
 pallas-primitives.workspace = true
+patricia_tree = "0.8.0"
 petgraph = "0.6.3"
 serde = { version = "1.0.197", features = ["derive", "rc"] }
 strum = "0.24.1"
 thiserror = "1.0.39"
-uplc = { path = '../uplc', version = "1.0.31-alpha" }
+uplc = { path = '../uplc', version = "1.1.2" }
 vec1 = "1.10.1"
 
 [target.'cfg(not(target_family="wasm"))'.dependencies]
@@ -43,3 +46,6 @@ chumsky = { version = "0.9.2", features = [
 indoc = "2.0.1"
 insta.workspace = true
 pretty_assertions = "1.3.0"
+
+[build-dependencies]
+built = { version = "0.7.1", features = ["git2"] }

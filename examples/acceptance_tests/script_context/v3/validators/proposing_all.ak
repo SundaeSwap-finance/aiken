@@ -1,6 +1,6 @@
 use aiken/collection/list
 use aiken/math/rational
-use cardano/credential.{Script, VerificationKey}
+use cardano/address.{Script, VerificationKey}
 use cardano/governance.{
   Constitution, ConstitutionalCommittee, GovernanceAction, GovernanceActionId,
   HardFork, NewConstitution, NicePoll, NoConfidence, ProposalProcedure,
@@ -14,11 +14,7 @@ const null32 =
   #"0000000000000000000000000000000000000000000000000000000000000000"
 
 validator guardrails {
-  propose(
-    _redeemer: Void,
-    _: ProposalProcedure,
-    transaction: Transaction,
-  ) -> Bool {
+  propose(_redeemer: Void, _: ProposalProcedure, transaction: Transaction) {
     let procedures = transaction.proposal_procedures
 
     assert_redeemers(transaction.redeemers)

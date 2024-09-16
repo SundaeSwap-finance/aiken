@@ -298,6 +298,7 @@ fn format_nested_when_if() {
             when xs is {
             [] ->
               []
+            [x] -> [1, 2, 3]
             [_x, ..rest] ->
               drop(rest, n - 1)
           }
@@ -1244,6 +1245,178 @@ fn format_validator_exhaustive_handlers_extra_non_default_fallback() {
                 True
               }
             }
+        "#
+    );
+}
+
+#[test]
+fn single_line_alternative_patterns() {
+    assert_format!(
+        r#"
+        fn foo() {
+            when bar is {
+                a | b | c -> True
+                d | e -> {
+                    let x = e + d
+                    x > 10
+                }
+                _ -> False
+            }
+        }
+        "#
+    );
+}
+
+#[test]
+fn multiline_alternative_patterns() {
+    assert_format!(
+        r#"
+        validator direct_proxy {
+          mint(_redeemer: Void, policy_id: PolicyId, self: Transaction) {
+            list.any(
+              self.certificates,
+              fn(certificate) {
+                when certificate is {
+                  RegisterDelegateRepresentative {
+                    delegate_representative: credential,
+                    ..
+                  } | UnregisterDelegateRepresentative {
+                    delegate_representative: credential,
+                    ..
+                  } | RegisterCredential { credential, .. } | UnregisterCredential {
+                    credential,
+                    ..
+                  } | RegisterAndDelegateCredential { credential, .. } ->
+                    credential == Script(policy_id)
+                  _ -> False
+                }
+              },
+            )
+          }
+        }
+        "#
+    );
+}
+
+#[test]
+fn trace_if_false_pipeline() {
+    assert_format!(
+        r#"
+        fn main(self) {
+          (self.extra_signatories |> list.has(self.extra_signatories, config.cold_key))?
+        }
+        "#
+    );
+}
+
+#[test]
+fn trace_if_false_unop() {
+    assert_format!(
+        r#"
+        fn main(self) {
+            (!True)?
+        }
+        "#
+    );
+}
+
+#[test]
+fn trace_if_false_todo() {
+    assert_format!(
+        r#"
+        fn main(self) {
+            (todo @"whatever")?
+        }
+        "#
+    );
+}
+
+#[test]
+fn trace_if_false_fail() {
+    assert_format!(
+        r#"
+        fn main(self) {
+            (fail @"whatever")?
+        }
+        "#
+    );
+}
+
+#[test]
+fn multiline_constant() {
+    assert_format!(
+        r#"
+        const n: Int = {
+            let x = 0
+            x + 1
+        }
+        "#
+    );
+}
+
+#[test]
+fn multiline_if_condition() {
+    assert_format!(
+        r#"
+        fn foo() {
+          if
+          list.is_empty(outputs) && (
+            !list.is_empty(mint_redeemers) || !list.is_empty(cert_redeemers)
+          ){
+            True
+          } else {
+              False
+          }
+        }
+        "#
+    );
+}
+
+#[test]
+fn callback_and_op() {
+    assert_format!(
+        r#"
+        fn foo() {
+            let labels = list.filter(labels, fn(lbl) {
+                and {
+                lbl != sc_missing_admin_approval_for_foreign_assets,
+                lbl != sc_missing_admin_approval_for_certificate_publish,
+              }
+            })
+            labels
+        }
+        "#
+    );
+}
+
+#[test]
+fn multiline_if_is() {
+    assert_format!(
+        r#"
+        fn foo() {
+            if first_asset
+            is
+            Pair(first_asset_policy, first_asset_tokens): Pair<PolicyId, Data> {
+                True
+                } else {
+                    False }
+        }
+        "#
+    );
+}
+
+#[test]
+fn multiline_if_is_2() {
+    assert_format!(
+        r#"
+        fn foo() {
+            if [1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0]
+            is
+            Pair(first_asset_policy, first_asset_tokens): Pair<PolicyId, Data> {
+                True
+                } else {
+                    False }
+        }
         "#
     );
 }

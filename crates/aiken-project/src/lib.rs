@@ -12,9 +12,9 @@ pub mod package_name;
 pub mod paths;
 pub mod pretty;
 pub mod telemetry;
-pub mod test_framework;
-pub mod utils;
 pub mod watch;
+
+mod test_framework;
 
 #[cfg(test)]
 mod tests;
@@ -36,12 +36,13 @@ use aiken_lang::{
         TypedFunction, UntypedDefinition,
     },
     builtins,
-    expr::UntypedExpr,
+    expr::{TypedExpr, UntypedExpr},
     format::{Formatter, MAX_COLUMNS},
     gen_uplc::CodeGenerator,
     line_numbers::LineNumbers,
+    test_framework::{Test, TestResult},
     tipo::{Type, TypeInfo},
-    IdGenerator,
+    utils, IdGenerator,
 };
 use export::Export;
 use indexmap::IndexMap;
@@ -51,14 +52,13 @@ use package_name::PackageName;
 use pallas_addresses::{Address, Network, ShelleyAddress, ShelleyDelegationPart, StakePayload};
 use pallas_primitives::conway::PolicyId;
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeSet, HashMap, HashSet},
     fs::{self, File},
     io::BufReader,
     path::{Path, PathBuf},
     rc::Rc,
 };
 use telemetry::EventListener;
-use test_framework::{Test, TestResult};
 use uplc::{
     ast::{Constant, Name, Program},
     PlutusData,
@@ -98,6 +98,7 @@ where
     checks_count: Option<usize>,
     event_listener: T,
     functions: IndexMap<FunctionAccessKey, TypedFunction>,
+    constants: IndexMap<FunctionAccessKey, TypedExpr>,
     data_types: IndexMap<DataTypeKey, TypedDataType>,
     module_sources: HashMap<String, (String, LineNumbers)>,
 }
@@ -149,6 +150,7 @@ where
             checks_count: None,
             event_listener,
             functions,
+            constants: IndexMap::new(),
             data_types,
             module_sources: HashMap::new(),
         }
@@ -158,6 +160,7 @@ where
         CodeGenerator::new(
             self.config.plutus,
             utils::indexmap::as_ref_values(&self.functions),
+            utils::indexmap::as_ref_values(&self.constants),
             utils::indexmap::as_ref_values(&self.data_types),
             utils::indexmap::as_str_ref_values(&self.module_types),
             utils::indexmap::as_str_ref_values(&self.module_sources),
@@ -419,7 +422,7 @@ where
                         if e.is_success() {
                             None
                         } else {
-                            Some(e.into_error(verbose))
+                            Some(Error::from_test_result(e, verbose))
                         }
                     })
                     .collect();
@@ -695,12 +698,12 @@ where
     fn parse_sources(&mut self, package_name: PackageName) -> Result<ParsedModules, Vec<Error>> {
         use rayon::prelude::*;
 
-        let (parsed_modules, errors) = self
+        let (parsed_modules, parse_errors, duplicates) = self
             .sources
             .par_drain(0..)
             .fold(
-                || (ParsedModules::new(), Vec::new()),
-                |(mut parsed_modules, mut errors), elem| {
+                || (ParsedModules::new(), Vec::new(), Vec::new()),
+                |(mut parsed_modules, mut parse_errors, mut duplicates), elem| {
                     let Source {
                         path,
                         name,
@@ -717,19 +720,24 @@ where
                                 kind,
                                 ast,
                                 code,
-                                name,
+                                name: name.clone(),
                                 path,
                                 extra,
                                 package: package_name.to_string(),
                             };
 
-                            parsed_modules.insert(module.name.clone(), module);
+                            let path = module.path.clone();
 
-                            (parsed_modules, errors)
+                            if let Some(first) = parsed_modules.insert(module.name.clone(), module)
+                            {
+                                duplicates.push((name, first.path.clone(), path))
+                            }
+
+                            (parsed_modules, parse_errors, duplicates)
                         }
                         Err(errs) => {
                             for error in errs {
-                                errors.push((
+                                parse_errors.push((
                                     path.clone(),
                                     code.clone(),
                                     NamedSource::new(path.display().to_string(), code.clone()),
@@ -737,31 +745,62 @@ where
                                 ))
                             }
 
-                            (parsed_modules, errors)
+                            (parsed_modules, parse_errors, duplicates)
                         }
                     }
                 },
             )
             .reduce(
-                || (ParsedModules::new(), Vec::new()),
-                |(mut parsed_modules, mut errors), (mut parsed, mut errs)| {
+                || (ParsedModules::new(), Vec::new(), Vec::new()),
+                |(mut parsed_modules, mut parse_errors, mut duplicates),
+                 (mut parsed, mut errs, mut dups)| {
+                    let keys_left = parsed_modules.keys().collect::<HashSet<_>>();
+                    let keys_right = parsed.keys().collect::<HashSet<_>>();
+
+                    for module in keys_left.intersection(&keys_right) {
+                        duplicates.push((
+                            module.to_string(),
+                            parsed_modules
+                                .get(module.as_str())
+                                .map(|m| m.path.clone())
+                                .unwrap(),
+                            parsed.get(module.as_str()).map(|m| m.path.clone()).unwrap(),
+                        ));
+                    }
+
                     parsed_modules.extend(parsed.drain());
 
-                    errors.append(&mut errs);
+                    parse_errors.append(&mut errs);
+                    duplicates.append(&mut dups);
 
-                    (parsed_modules, errors)
+                    (parsed_modules, parse_errors, duplicates)
                 },
             );
 
-        let mut errors: Vec<Error> = errors
-            .into_iter()
-            .map(|(path, src, named, error)| Error::Parse {
-                path,
-                src,
-                named: named.into(),
-                error,
-            })
-            .collect();
+        let mut errors: Vec<Error> = Vec::new();
+
+        errors.extend(
+            duplicates
+                .into_iter()
+                .map(|(module, first, second)| Error::DuplicateModule {
+                    module,
+                    first,
+                    second,
+                })
+                .collect::<Vec<_>>(),
+        );
+
+        errors.extend(
+            parse_errors
+                .into_iter()
+                .map(|(path, src, named, error)| Error::Parse {
+                    path,
+                    src,
+                    named: named.into(),
+                    error,
+                })
+                .collect::<Vec<_>>(),
+        );
 
         for parsed_module in parsed_modules.values() {
             if let Some(first) = self
@@ -805,10 +844,13 @@ where
                     &mut self.module_sources,
                     &mut self.module_types,
                     &mut self.functions,
+                    &mut self.constants,
                     &mut self.data_types,
                 )?;
 
-                if our_modules.contains(checked_module.name.as_str()) {
+                if our_modules.contains(checked_module.name.as_str())
+                    && checked_module.name.as_str() != ast::CONFIG_MODULE
+                {
                     self.warnings.extend(warnings);
                 }
 
@@ -961,9 +1003,8 @@ where
 
                 let path = d.into_path();
                 let keep = is_aiken_path(&path, dir);
-                let ext = path.extension();
 
-                if !keep && ext.unwrap_or_default() == "ak" {
+                if !keep {
                     self.warnings
                         .push(Warning::InvalidModuleName { path: path.clone() });
                 }

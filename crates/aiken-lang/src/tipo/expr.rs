@@ -11,16 +11,17 @@ use super::{
 use crate::{
     ast::{
         self, Annotation, ArgName, AssignmentKind, AssignmentPattern, BinOp, Bls12_381Point,
-        ByteArrayFormatPreference, CallArg, Constant, Curve, Function, IfBranch,
-        LogicalOpChainKind, Pattern, RecordUpdateSpread, Span, TraceKind, TraceLevel, Tracing,
-        TypedArg, TypedCallArg, TypedClause, TypedIfBranch, TypedPattern, TypedRecordUpdateArg,
-        TypedValidator, UnOp, UntypedArg, UntypedAssignmentKind, UntypedClause, UntypedFunction,
-        UntypedIfBranch, UntypedPattern, UntypedRecordUpdateArg,
+        ByteArrayFormatPreference, CallArg, Curve, Function, IfBranch, LogicalOpChainKind, Pattern,
+        RecordUpdateSpread, Span, TraceKind, TraceLevel, Tracing, TypedArg, TypedCallArg,
+        TypedClause, TypedIfBranch, TypedPattern, TypedRecordUpdateArg, TypedValidator, UnOp,
+        UntypedArg, UntypedAssignmentKind, UntypedClause, UntypedFunction, UntypedIfBranch,
+        UntypedPattern, UntypedRecordUpdateArg,
     },
     builtins::{from_default_function, BUILTIN},
     expr::{FnStyle, TypedExpr, UntypedExpr},
     format,
-    tipo::{fields::FieldMap, DefaultFunction, PatternConstructor, TypeVar},
+    parser::token::Base,
+    tipo::{fields::FieldMap, DefaultFunction, ModuleKind, PatternConstructor, TypeVar},
     IdGenerator,
 };
 use std::{
@@ -434,8 +435,8 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
             UntypedExpr::UInt {
                 location,
                 value,
-                base: _,
-            } => Ok(self.infer_uint(value, location)),
+                base,
+            } => Ok(self.infer_uint(value, base, location)),
 
             UntypedExpr::Sequence {
                 expressions,
@@ -550,8 +551,8 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
             UntypedExpr::CurvePoint {
                 location,
                 point,
-                preferred_format: _,
-            } => self.infer_curve_point(*point, location),
+                preferred_format,
+            } => self.infer_curve_point(*point, preferred_format, location),
 
             UntypedExpr::RecordUpdate {
                 location,
@@ -592,10 +593,16 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
             location,
             bytes,
             tipo: Type::byte_array(),
+            preferred_format,
         })
     }
 
-    fn infer_curve_point(&mut self, curve: Curve, location: Span) -> Result<TypedExpr, Error> {
+    fn infer_curve_point(
+        &mut self,
+        curve: Curve,
+        preferred_format: ByteArrayFormatPreference,
+        location: Span,
+    ) -> Result<TypedExpr, Error> {
         let tipo = match curve {
             Curve::Bls12_381(point) => match point {
                 Bls12_381Point::G1(_) => Type::g1_element(),
@@ -607,6 +614,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
             location,
             point: curve.into(),
             tipo,
+            preferred_format,
         })
     }
 
@@ -912,32 +920,136 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         })
     }
 
+    fn infer_validator_handler_access(
+        &mut self,
+        container: &UntypedExpr,
+        label: &str,
+        access_location: Span,
+    ) -> Option<Result<TypedExpr, Error>> {
+        match container {
+            UntypedExpr::Var { name, location } => {
+                if let Some((_, available_handlers)) = self
+                    .environment
+                    .module_validators
+                    .get(name.as_str())
+                    .cloned()
+                {
+                    return Some(
+                        self.infer_var(
+                            TypedValidator::handler_name(name.as_str(), label),
+                            *location,
+                        )
+                        .map_err(|err| match err {
+                            Error::UnknownVariable { .. } => Error::UnknownValidatorHandler {
+                                location: access_location.map(|_start, end| (location.end, end)),
+                                available_handlers,
+                            },
+                            _ => err,
+                        }),
+                    );
+                }
+            }
+            UntypedExpr::FieldAccess {
+                label: name,
+                container,
+                location,
+            } => {
+                if let UntypedExpr::Var {
+                    name: ref module,
+                    location: module_location,
+                } = container.as_ref()
+                {
+                    match self.environment.imported_modules.get(module) {
+                        Some((_, info)) if info.kind == ModuleKind::Validator => {
+                            let has_validator = info
+                                .values
+                                .keys()
+                                .any(|k| k.split(".").next() == Some(name));
+
+                            let value_constructors = info
+                                .values
+                                .keys()
+                                .map(|k| k.split(".").next().unwrap_or(k).to_string())
+                                .collect::<Vec<_>>();
+
+                            return Some(
+                                self.infer_module_access(
+                                    module,
+                                    TypedValidator::handler_name(name, label),
+                                    location,
+                                    access_location,
+                                )
+                                .and_then(|access| {
+                                    let export_values = self
+                                        .environment
+                                        .module_values
+                                        .iter()
+                                        .any(|(_, constructor)| constructor.public);
+                                    let export_functions = self
+                                        .environment
+                                        .module_functions
+                                        .iter()
+                                        .any(|(_, function)| function.public);
+                                    let export_validators =
+                                        !self.environment.module_validators.is_empty();
+
+                                    if export_values || export_functions || export_validators {
+                                        return Err(Error::ValidatorImported {
+                                            location: location
+                                                .map(|_start, end| (module_location.end, end)),
+                                            name: name.to_string(),
+                                        });
+                                    }
+
+                                    Ok(access)
+                                })
+                                .map_err(|err| match err {
+                                    Error::UnknownModuleValue { .. } => {
+                                        if has_validator {
+                                            Error::UnknownValidatorHandler {
+                                                location: access_location
+                                                    .map(|_start, end| (location.end, end)),
+                                                available_handlers: Vec::new(),
+                                            }
+                                        } else {
+                                            Error::UnknownModuleValue {
+                                                location: location
+                                                    .map(|_start, end| (module_location.end, end)),
+                                                name: name.to_string(),
+                                                module_name: module.to_string(),
+                                                value_constructors,
+                                            }
+                                        }
+                                    }
+                                    _ => err,
+                                }),
+                            );
+                        }
+                        _ => (),
+                    }
+                }
+            }
+            _ => (),
+        }
+
+        None
+    }
+
     fn infer_field_access(
         &mut self,
         container: UntypedExpr,
         label: String,
         access_location: Span,
     ) -> Result<TypedExpr, Error> {
-        if let UntypedExpr::Var { ref name, location } = container {
-            if let Some((_, available_handlers)) = self
-                .environment
-                .module_validators
-                .get(name.as_str())
-                .cloned()
-            {
-                return self
-                    .infer_var(
-                        TypedValidator::handler_name(name.as_str(), label.as_str()),
-                        location,
-                    )
-                    .map_err(|err| match err {
-                        Error::UnknownVariable { .. } => Error::UnknownValidatorHandler {
-                            location: access_location.map(|_start, end| (location.end, end)),
-                            available_handlers,
-                        },
-                        _ => err,
-                    });
-            }
+        // NOTE: Before we actually resolve the field access, we try to short-circuit the access if
+        // we detect a validator handler access. This can happen in two cases:
+        //
+        // - Either it is a direct access from a validator in the same module.
+        // - Or it is an attempt to pull a handler from an imported validator module.
+        if let Some(shortcircuit) =
+            self.infer_validator_handler_access(&container, &label, access_location)
+        {
+            return shortcircuit;
         }
 
         // Attempt to infer the container as a record access. If that fails, we may be shadowing the name
@@ -1176,7 +1288,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         Ok((typed_arg, extra_assignment))
     }
 
-    fn infer_assignment(
+    pub fn infer_assignment(
         &mut self,
         untyped_pattern: UntypedPattern,
         untyped_value: UntypedExpr,
@@ -1466,64 +1578,6 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         Ok(typed_patterns)
     }
 
-    // TODO: extract the type annotation checking into a infer_module_const
-    // function that uses this function internally
-    pub fn infer_const(
-        &mut self,
-        annotation: &Option<Annotation>,
-        value: Constant,
-    ) -> Result<Constant, Error> {
-        let inferred = match value {
-            Constant::Int {
-                location,
-                value,
-                base,
-            } => Ok(Constant::Int {
-                location,
-                value,
-                base,
-            }),
-
-            Constant::String { location, value } => Ok(Constant::String { location, value }),
-
-            Constant::ByteArray {
-                location,
-                bytes,
-                preferred_format,
-            } => {
-                let _ = self.infer_bytearray(bytes.clone(), preferred_format, location)?;
-                Ok(Constant::ByteArray {
-                    location,
-                    bytes,
-                    preferred_format,
-                })
-            }
-            Constant::CurvePoint {
-                location,
-                point,
-                preferred_format,
-            } => Ok(Constant::CurvePoint {
-                location,
-                point,
-                preferred_format,
-            }),
-        }?;
-
-        // Check type annotation is accurate.
-        if let Some(ann) = annotation {
-            let const_ann = self.type_from_annotation(ann)?;
-
-            self.unify(
-                const_ann.clone(),
-                inferred.tipo(),
-                inferred.location(),
-                const_ann.is_data(),
-            )?;
-        };
-
-        Ok(inferred)
-    }
-
     fn infer_if(
         &mut self,
         branches: Vec1<UntypedIfBranch>,
@@ -1765,11 +1819,12 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         Ok((args, body, return_type))
     }
 
-    fn infer_uint(&mut self, value: String, location: Span) -> TypedExpr {
+    fn infer_uint(&mut self, value: String, base: Base, location: Span) -> TypedExpr {
         TypedExpr::UInt {
             location,
             value,
             tipo: Type::int(),
+            base,
         }
     }
 
@@ -2778,6 +2833,7 @@ fn diagnose_expr(expr: TypedExpr) -> TypedExpr {
                             tipo: Type::byte_array(),
                             bytes: vec![],
                             location,
+                            preferred_format: ByteArrayFormatPreference::HexadecimalString,
                         },
                     },
                 ],

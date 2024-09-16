@@ -51,7 +51,7 @@ dependencies = [
 
 [[package]]
 name = "aiken"
-version = "1.0.31-alpha"
+version = "1.1.2"
 dependencies = [
  "aiken-lang",
  "aiken-lsp",
@@ -79,10 +79,12 @@ dependencies = [
 
 [[package]]
 name = "aiken-lang"
-version = "1.0.31-alpha"
+version = "1.1.2"
 dependencies = [
  "blst",
+ "built",
  "chumsky",
+ "cryptoxide",
  "hex",
  "indexmap 1.9.3",
  "indoc",
@@ -93,6 +95,7 @@ dependencies = [
  "ordinal",
  "owo-colors 3.5.0",
  "pallas-primitives",
+ "patricia_tree",
  "petgraph",
  "pretty_assertions",
  "serde",
@@ -104,7 +107,7 @@ dependencies = [
 
 [[package]]
 name = "aiken-lsp"
-version = "1.0.31-alpha"
+version = "1.1.2"
 dependencies = [
  "aiken-lang",
  "aiken-project",
@@ -125,7 +128,7 @@ dependencies = [
 
 [[package]]
 name = "aiken-project"
-version = "1.0.31-alpha"
+version = "1.1.2"
 dependencies = [
  "aiken-lang",
  "askama",
@@ -133,7 +136,6 @@ dependencies = [
  "built",
  "camino",
  "ciborium",
- "cryptoxide",
  "dirs",
  "fslock",
  "futures",
@@ -152,7 +154,6 @@ dependencies = [
  "pallas-crypto",
  "pallas-primitives",
  "pallas-traverse",
- "patricia_tree",
  "petgraph",
  "pretty_assertions",
  "proptest",
@@ -2276,14 +2277,21 @@ dependencies = [
 
 [[package]]
 name = "pulldown-cmark"
-version = "0.9.6"
+version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "57206b407293d2bcd3af849ce869d52068623f19e1b5ff8e8778e3309439682b"
+checksum = "4d31cbfcd94884c3a67ec210c83efb06cb43674043458b0ad59f6947f8462c23"
 dependencies = [
  "bitflags 2.6.0",
  "memchr",
+ "pulldown-cmark-escape",
  "unicase",
 ]
+
+[[package]]
+name = "pulldown-cmark-escape"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "007d8adb5ddab6f8e3f491ac63566a7d5002cc7ed73901f72057943fa71ae1ae"
 
 [[package]]
 name = "quick-error"
@@ -3214,7 +3222,7 @@ checksum = "0336d538f7abc86d282a4189614dfaa90810dfc2c6f6427eaf88e16311dd225d"
 
 [[package]]
 name = "uplc"
-version = "1.0.31-alpha"
+version = "1.1.2"
 dependencies = [
  "blst",
  "cryptoxide",

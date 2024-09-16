@@ -3237,3 +3237,42 @@ fn extraneous_fallback_on_exhaustive_handlers() {
         Err((_, Error::UnexpectedValidatorFallback { .. }))
     ))
 }
+
+#[test]
+fn constant_usage() {
+    let source_code = r#"
+        pub const some_bool_constant: Bool = True
+
+        const some_int_constant: Int = 42
+
+        const some_string_constant: String = @"Aiken"
+
+        test foo() {
+          some_int_constant == 42
+        }
+    "#;
+
+    let result = check(parse(source_code));
+    assert!(result.is_ok());
+
+    let (warnings, _) = result.unwrap();
+    assert!(matches!(
+        &warnings[..],
+        [Warning::UnusedPrivateModuleConstant {
+            name,
+            ..
+        }] if name == "some_string_constant"
+    ));
+}
+
+#[test]
+fn wrong_arity_on_known_builtin() {
+    let source_code = r#"
+        const foo: Option<Int> = Some()
+    "#;
+
+    assert!(matches!(
+        check_validator(parse(source_code)),
+        Err((_, Error::IncorrectFunctionCallArity { .. }))
+    ))
+}

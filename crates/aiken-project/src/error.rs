@@ -3,6 +3,7 @@ use aiken_lang::{
     ast::{self, Span},
     error::ExtraData,
     parser::error::ParseError,
+    test_framework::{PropertyTestResult, TestResult, UnitTestResult},
     tipo,
 };
 use miette::{
@@ -23,7 +24,7 @@ use zip::result::ZipError;
 #[allow(dead_code)]
 #[derive(thiserror::Error)]
 pub enum Error {
-    #[error("I just found two modules with the same name: '{module}'")]
+    #[error("I just found two modules with the same name: '{}'", module.if_supports_color(Stderr, |s| s.yellow()))]
     DuplicateModule {
         module: String,
         first: PathBuf,
@@ -161,6 +162,28 @@ impl Error {
         }
 
         errors
+    }
+
+    pub fn from_test_result<U, T>(result: &TestResult<U, T>, verbose: bool) -> Self {
+        let (name, path, src) = match result {
+            TestResult::UnitTestResult(UnitTestResult { test, .. }) => (
+                test.name.to_string(),
+                test.input_path.to_path_buf(),
+                test.program.to_pretty(),
+            ),
+            TestResult::PropertyTestResult(PropertyTestResult { test, .. }) => (
+                test.name.to_string(),
+                test.input_path.to_path_buf(),
+                test.program.to_pretty(),
+            ),
+        };
+
+        Error::TestFailure {
+            name,
+            path,
+            src,
+            verbose,
+        }
     }
 }
 
@@ -330,9 +353,9 @@ impl Diagnostic for Error {
     fn help<'a>(&'a self) -> Option<Box<dyn Display + 'a>> {
         match self {
             Error::DuplicateModule { first, second, .. } => Some(Box::new(format!(
-                "Rename either {} or {}",
-                first.display(),
-                second.display()
+                "Rename either of them:\n- {}\n- {}",
+                first.display().if_supports_color(Stderr, |s| s.yellow()),
+                second.display().if_supports_color(Stderr, |s| s.yellow()),
             ))),
             Error::FileIo { error, .. } => Some(Box::new(format!("{error}"))),
             Error::Blueprint(e) => e.help(),

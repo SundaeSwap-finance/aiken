@@ -1,11 +1,12 @@
 use super::{
     air::ExpectLevel,
-    tree::{AirMsg, AirTree, TreePath},
+    interner::AirInterner,
+    tree::{AirMsg, AirTree},
 };
 use crate::{
     ast::{
-        Constant, DataTypeKey, FunctionAccessKey, Pattern, Span, TraceLevel, TypedArg,
-        TypedAssignmentKind, TypedClause, TypedDataType, TypedPattern,
+        DataTypeKey, FunctionAccessKey, Pattern, Span, TraceLevel, TypedArg, TypedAssignmentKind,
+        TypedClause, TypedDataType, TypedPattern,
     },
     expr::TypedExpr,
     line_numbers::{LineColumn, LineNumbers},
@@ -17,7 +18,7 @@ use crate::{
 };
 use indexmap::{IndexMap, IndexSet};
 use itertools::{Itertools, Position};
-use std::{collections::HashMap, ops::Deref, rc::Rc};
+use std::{ops::Deref, rc::Rc};
 use uplc::{
     ast::{Constant as UplcConstant, Name, Term, Type as UplcType},
     builder::{CONSTR_FIELDS_EXPOSER, CONSTR_INDEX_EXPOSER},
@@ -41,6 +42,7 @@ pub const CONSTR_NOT_EMPTY: &str = "__CONSTR_NOT_EMPTY";
 pub const INCORRECT_BOOLEAN: &str = "__INCORRECT_BOOLEAN";
 pub const INCORRECT_CONSTR: &str = "__INCORRECT_CONSTR";
 pub const CONSTR_INDEX_MISMATCH: &str = "__CONSTR_INDEX_MISMATCH";
+pub const DISCARDED: &str = "_";
 
 #[derive(Clone, Debug)]
 pub enum CodeGenFunction {
@@ -287,15 +289,6 @@ impl Default for CodeGenSpecialFuncs {
     }
 }
 
-pub fn constants_ir(literal: &Constant) -> AirTree {
-    match literal {
-        Constant::Int { value, .. } => AirTree::int(value),
-        Constant::String { value, .. } => AirTree::string(value),
-        Constant::ByteArray { bytes, .. } => AirTree::byte_array(bytes.clone()),
-        Constant::CurvePoint { point, .. } => AirTree::curve(*point.as_ref()),
-    }
-}
-
 pub fn get_generic_variant_name(t: &Rc<Type>) -> String {
     let uplc_type = t.get_uplc_type();
 
@@ -430,21 +423,17 @@ pub fn is_recursive_function_call<'a>(
 
 pub fn identify_recursive_static_params(
     air_tree: &mut AirTree,
-    tree_path: &TreePath,
+
     func_params: &[String],
     func_key: &(FunctionAccessKey, String),
     function_calls_and_usage: &mut (usize, usize),
-    shadowed_parameters: &mut HashMap<String, TreePath>,
+
     potential_recursive_statics: &mut Vec<String>,
 ) {
     let variant = &func_key.1;
     let func_key = &func_key.0;
-    // Find whether any of the potential recursive statics get shadowed (because even if we pass in the same referenced name, it might not be static)
-    for introduced_variable in find_introduced_variables(air_tree) {
-        if potential_recursive_statics.contains(&introduced_variable) {
-            shadowed_parameters.insert(introduced_variable, tree_path.clone());
-        }
-    }
+
+    // Now all variables can't be shadowed at this stage due to interning
     // Otherwise, if this is a recursive call site, disqualify anything that is different (or the same, but shadowed)
     if let (true, Some(args)) = is_recursive_function_call(air_tree, func_key, variant) {
         for (param, arg) in func_params.iter().zip(args) {
@@ -455,18 +444,9 @@ pub fn identify_recursive_static_params(
                 // Check if we pass something different in this recursive call site
                 // by different, we mean
                 // - a variable that is bound to a different name
-                // - a variable with the same name, but that was shadowed in an ancestor scope
                 // - any other type of expression
                 let param_is_different = match arg {
-                    AirTree::Var { name, .. } => {
-                        // "shadowed in an ancestor scope" means "the definition scope is a prefix of our scope"
-                        name != param
-                            || if let Some(p) = shadowed_parameters.get(param) {
-                                p.common_ancestor(tree_path) == *p
-                            } else {
-                                false
-                            }
-                    }
+                    AirTree::Var { name, .. } => name != param,
                     _ => true,
                 };
                 // If so, then we disqualify this parameter from being a recursive static parameter
@@ -505,25 +485,20 @@ pub fn modify_self_calls(
     func_params: &[String],
 ) -> Vec<String> {
     let mut potential_recursive_statics = func_params.to_vec();
+
     // identify which parameters are recursively nonstatic (i.e. get modified before the self-call)
     // TODO: this would be a lot simpler if each `Var`, `Let`, function argument, etc. had a unique identifier
     // rather than just a name; this would let us track if the Var passed to itself was the same value as the method argument
-    let mut shadowed_parameters: HashMap<String, TreePath> = HashMap::new();
     let mut calls_and_var_usage = (0, 0);
-    body.traverse_tree_with(
-        &mut |air_tree: &mut AirTree, tree_path| {
-            identify_recursive_static_params(
-                air_tree,
-                tree_path,
-                func_params,
-                &(func_key.clone(), variant.clone()),
-                &mut calls_and_var_usage,
-                &mut shadowed_parameters,
-                &mut potential_recursive_statics,
-            );
-        },
-        false,
-    );
+    body.traverse_tree_with(&mut |air_tree: &mut AirTree, _tree_path| {
+        identify_recursive_static_params(
+            air_tree,
+            func_params,
+            &(func_key.clone(), variant.clone()),
+            &mut calls_and_var_usage,
+            &mut potential_recursive_statics,
+        );
+    });
 
     // Find the index of any recursively static parameters,
     // so we can remove them from the call-site of each recursive call
@@ -535,69 +510,64 @@ pub fn modify_self_calls(
         .collect();
 
     // Modify any self calls to remove recursive static parameters and append `self` as a parameter for the recursion
-    body.traverse_tree_with(
-        &mut |air_tree: &mut AirTree, _| {
-            if let AirTree::Call {
-                func: func_recursive,
-                args,
-                ..
-            } = air_tree
-            {
-                if let AirTree::Call { func, .. } = func_recursive.as_ref() {
-                    if let AirTree::Var {
-                        constructor:
-                            ValueConstructor {
-                                variant: ValueConstructorVariant::ModuleFn { name, module, .. },
-                                ..
-                            },
-                        variant_name,
-                        ..
-                    } = func.as_ref()
+    body.traverse_tree_with(&mut |air_tree: &mut AirTree, _| {
+        if let AirTree::Call {
+            func: func_recursive,
+            args,
+            ..
+        } = air_tree
+        {
+            if let AirTree::Call { func, .. } = func_recursive.as_ref() {
+                if let AirTree::Var {
+                    constructor:
+                        ValueConstructor {
+                            variant: ValueConstructorVariant::ModuleFn { name, module, .. },
+                            ..
+                        },
+                    variant_name,
+                    ..
+                } = func.as_ref()
+                {
+                    // The name must match and the recursive function must not be
+                    // passed around for this optimization to work.
+                    if name == &func_key.function_name
+                        && module == &func_key.module_name
+                        && variant == variant_name
+                        && calls_and_var_usage.0 == calls_and_var_usage.1
                     {
-                        // The name must match and the recursive function must not be
-                        // passed around for this optimization to work.
-                        if name == &func_key.function_name
-                            && module == &func_key.module_name
-                            && variant == variant_name
-                            && calls_and_var_usage.0 == calls_and_var_usage.1
-                        {
-                            // Remove any static-recursive-parameters, because they'll be bound statically
-                            // above the recursive part of the function
-                            // note: assumes that static_recursive_params is sorted
-                            for arg in recursive_static_indexes.iter().rev() {
-                                args.remove(*arg);
-                            }
-                            args.insert(0, func.as_ref().clone());
-                            *func_recursive = func.as_ref().clone().into();
+                        // Remove any static-recursive-parameters, because they'll be bound statically
+                        // above the recursive part of the function
+                        // note: assumes that static_recursive_params is sorted
+                        for arg in recursive_static_indexes.iter().rev() {
+                            args.remove(*arg);
                         }
                     }
                 }
-            } else if let AirTree::Var {
-                constructor:
-                    ValueConstructor {
-                        variant: ValueConstructorVariant::ModuleFn { name, module, .. },
-                        ..
-                    },
-                variant_name,
-                ..
-            } = &air_tree
-            {
-                if name.clone() == func_key.function_name
-                    && module.clone() == func_key.module_name
-                    && variant.clone() == variant_name.clone()
-                {
-                    let self_call = AirTree::call(
-                        air_tree.clone(),
-                        air_tree.return_type(),
-                        vec![air_tree.clone()],
-                    );
-
-                    *air_tree = self_call;
-                }
             }
-        },
-        true,
-    );
+        } else if let AirTree::Var {
+            constructor:
+                ValueConstructor {
+                    variant: ValueConstructorVariant::ModuleFn { name, module, .. },
+                    ..
+                },
+            variant_name,
+            ..
+        } = &air_tree
+        {
+            if name.clone() == func_key.function_name
+                && module.clone() == func_key.module_name
+                && variant.clone() == variant_name.clone()
+            {
+                let self_call = AirTree::call(
+                    air_tree.clone(),
+                    air_tree.return_type(),
+                    vec![air_tree.clone()],
+                );
+
+                *air_tree = self_call;
+            }
+        }
+    });
 
     // In the case of equal calls to usage we can reduce the static params
     if calls_and_var_usage.0 == calls_and_var_usage.1 {
@@ -620,71 +590,68 @@ pub fn modify_cyclic_calls(
         (CycleFunctionNames, usize, FunctionAccessKey),
     >,
 ) {
-    body.traverse_tree_with(
-        &mut |air_tree: &mut AirTree, _| {
-            if let AirTree::Var {
-                constructor:
-                    ValueConstructor {
-                        variant: ValueConstructorVariant::ModuleFn { name, module, .. },
-                        tipo,
-                        ..
-                    },
-                variant_name,
-                ..
-            } = air_tree
+    body.traverse_tree_with(&mut |air_tree: &mut AirTree, _| {
+        if let AirTree::Var {
+            constructor:
+                ValueConstructor {
+                    variant: ValueConstructorVariant::ModuleFn { name, module, .. },
+                    tipo,
+                    ..
+                },
+            variant_name,
+            ..
+        } = air_tree
+        {
+            let tipo = tipo.clone();
+            let var_key = FunctionAccessKey {
+                module_name: module.clone(),
+                function_name: name.clone(),
+            };
+
+            if let Some((names, index, cyclic_name)) =
+                cyclic_links.get(&(var_key.clone(), variant_name.to_string()))
             {
-                let tipo = tipo.clone();
-                let var_key = FunctionAccessKey {
-                    module_name: module.clone(),
-                    function_name: name.clone(),
-                };
+                if *cyclic_name == *func_key {
+                    let cyclic_var_name = if cyclic_name.module_name.is_empty() {
+                        cyclic_name.function_name.to_string()
+                    } else {
+                        format!("{}_{}", cyclic_name.module_name, cyclic_name.function_name)
+                    };
 
-                if let Some((names, index, cyclic_name)) =
-                    cyclic_links.get(&(var_key.clone(), variant_name.to_string()))
-                {
-                    if *cyclic_name == *func_key {
-                        let cyclic_var_name = if cyclic_name.module_name.is_empty() {
-                            cyclic_name.function_name.to_string()
-                        } else {
-                            format!("{}_{}", cyclic_name.module_name, cyclic_name.function_name)
-                        };
+                    let index_name = names[*index].clone();
 
-                        let index_name = names[*index].clone();
-
-                        let var = AirTree::var(
-                            ValueConstructor::public(
-                                tipo.clone(),
-                                ValueConstructorVariant::ModuleFn {
-                                    name: cyclic_var_name.clone(),
-                                    field_map: None,
-                                    module: "".to_string(),
-                                    arity: 2,
-                                    location: Span::empty(),
-                                    builtin: None,
-                                },
-                            ),
-                            cyclic_var_name,
-                            "".to_string(),
-                        );
-
-                        *air_tree = AirTree::call(
-                            var.clone(),
+                    let var = AirTree::var(
+                        ValueConstructor::public(
                             tipo.clone(),
-                            vec![
-                                var,
-                                AirTree::anon_func(
-                                    names.clone(),
-                                    AirTree::local_var(index_name, tipo),
-                                    false,
-                                ),
-                            ],
-                        );
-                    }
+                            ValueConstructorVariant::ModuleFn {
+                                name: cyclic_var_name.clone(),
+                                field_map: None,
+                                module: "".to_string(),
+                                arity: 2,
+                                location: Span::empty(),
+                                builtin: None,
+                            },
+                        ),
+                        cyclic_var_name,
+                        "".to_string(),
+                    );
+
+                    *air_tree = AirTree::call(
+                        var.clone(),
+                        tipo.clone(),
+                        vec![
+                            var,
+                            AirTree::anon_func(
+                                names.clone(),
+                                AirTree::local_var(index_name, tipo),
+                                false,
+                            ),
+                        ],
+                    );
                 }
             }
-        },
-        true,
-    );
+        }
+    });
 }
 
 pub fn pattern_has_conditions(
@@ -990,7 +957,9 @@ pub fn unknown_data_to_type(term: Term<Name>, field_type: &Type) -> Term<Name> {
             .lambda("__list_data")
             .apply(Term::unlist_data().apply(term)),
         Some(UplcType::Bool) => Term::unwrap_bool_or(term, |result| result, &Term::Error.delay()),
-        Some(UplcType::Unit) => Term::unwrap_void_or(term, |result| result, &Term::Error.delay()),
+        Some(UplcType::Unit) => term.as_var("val", |val| {
+            Term::Var(val).unwrap_void_or(|result| result, &Term::Error.delay())
+        }),
 
         Some(UplcType::Data) | None => term,
     }
@@ -1668,19 +1637,26 @@ pub fn get_list_elements_len_and_tail(
     }
 }
 
-pub fn cast_validator_args(term: Term<Name>, arguments: &[TypedArg]) -> Term<Name> {
+pub fn cast_validator_args(
+    term: Term<Name>,
+    arguments: &[TypedArg],
+    interner: &AirInterner,
+) -> Term<Name> {
     let mut term = term;
     for arg in arguments.iter().rev() {
+        let name = arg
+            .arg_name
+            .get_variable_name()
+            .map(|arg| interner.lookup_interned(&arg.to_string()))
+            .unwrap_or_else(|| "_".to_string());
+
         if !matches!(arg.tipo.get_uplc_type(), Some(UplcType::Data) | None) {
             term = term
-                .lambda(arg.arg_name.get_variable_name().unwrap_or("_"))
-                .apply(known_data_to_type(
-                    Term::var(arg.arg_name.get_variable_name().unwrap_or("_")),
-                    &arg.tipo,
-                ));
+                .lambda(&name)
+                .apply(known_data_to_type(Term::var(&name), &arg.tipo));
         }
 
-        term = term.lambda(arg.arg_name.get_variable_name().unwrap_or("_"))
+        term = term.lambda(name)
     }
     term
 }
@@ -1726,6 +1702,11 @@ pub fn get_src_code_by_span(
     span: &Span,
     module_src: &IndexMap<&str, &(String, LineNumbers)>,
 ) -> String {
+    assert!(
+        *span != Span::empty(),
+        "tried to lookup source code from empty location"
+    );
+
     let (src, _) = module_src
         .get(module_name)
         .unwrap_or_else(|| panic!("Missing module {module_name}"));
@@ -1740,6 +1721,11 @@ pub fn get_line_columns_by_span(
     span: &Span,
     module_src: &IndexMap<&str, &(String, LineNumbers)>,
 ) -> LineColumn {
+    assert!(
+        *span != Span::empty(),
+        "tried to lookup line & columns from empty location"
+    );
+
     let (_, lines) = module_src
         .get(module_name)
         .unwrap_or_else(|| panic!("Missing module {module_name}"));
@@ -1747,4 +1733,90 @@ pub fn get_line_columns_by_span(
     lines
         .line_and_column_number(span.start)
         .expect("Out of bounds span")
+}
+
+pub fn introduce_pattern(interner: &mut AirInterner, pattern: &TypedPattern) {
+    match pattern {
+        Pattern::Int { .. } | Pattern::ByteArray { .. } | Pattern::Discard { .. } => (),
+
+        Pattern::Var { name, .. } => {
+            interner.intern(name.clone());
+        }
+        Pattern::Assign { name, pattern, .. } => {
+            interner.intern(name.clone());
+            introduce_pattern(interner, pattern);
+        }
+
+        Pattern::List { elements, tail, .. } => {
+            elements.iter().for_each(|element| {
+                introduce_pattern(interner, element);
+            });
+
+            tail.iter().for_each(|tail| {
+                introduce_pattern(interner, tail);
+            });
+        }
+        Pattern::Constructor {
+            arguments: elems, ..
+        } => {
+            elems.iter().for_each(|element| {
+                introduce_pattern(interner, &element.value);
+            });
+        }
+        Pattern::Tuple { elems, .. } => {
+            elems.iter().for_each(|element| {
+                introduce_pattern(interner, element);
+            });
+        }
+        Pattern::Pair { fst, snd, .. } => {
+            introduce_pattern(interner, fst);
+            introduce_pattern(interner, snd);
+        }
+    }
+}
+
+pub fn pop_pattern(interner: &mut AirInterner, pattern: &TypedPattern) {
+    match pattern {
+        Pattern::Int { .. } | Pattern::ByteArray { .. } | Pattern::Discard { .. } => (),
+
+        Pattern::Var { name, .. } => {
+            interner.pop_text(name.clone());
+        }
+        Pattern::Assign { name, pattern, .. } => {
+            interner.pop_text(name.clone());
+            pop_pattern(interner, pattern);
+        }
+
+        Pattern::List { elements, tail, .. } => {
+            elements.iter().for_each(|element| {
+                pop_pattern(interner, element);
+            });
+
+            tail.iter().for_each(|tail| {
+                pop_pattern(interner, tail);
+            });
+        }
+        Pattern::Constructor {
+            arguments: elems, ..
+        } => {
+            elems.iter().for_each(|element| {
+                pop_pattern(interner, &element.value);
+            });
+        }
+        Pattern::Tuple { elems, .. } => {
+            elems.iter().for_each(|element| {
+                pop_pattern(interner, element);
+            });
+        }
+        Pattern::Pair { fst, snd, .. } => {
+            pop_pattern(interner, fst);
+            pop_pattern(interner, snd);
+        }
+    }
+}
+
+pub fn introduce_name(interner: &mut AirInterner, name: &String) -> String {
+    interner.intern(name.clone());
+
+    interner.lookup_interned(name)
 }

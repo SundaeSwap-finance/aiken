@@ -1,7 +1,7 @@
 use crate::{
     ast::{
         Annotation, ArgBy, ArgName, ArgVia, AssignmentKind, AssignmentPattern, BinOp,
-        ByteArrayFormatPreference, CallArg, Constant, CurveType, DataType, Definition, Function,
+        ByteArrayFormatPreference, CallArg, CurveType, DataType, Definition, Function,
         LogicalOpChainKind, ModuleConstant, OnTestFailure, Pattern, RecordConstructor,
         RecordConstructorArg, RecordUpdateSpread, Span, TraceKind, TypeAlias, TypedArg,
         TypedValidator, UnOp, UnqualifiedImport, UntypedArg, UntypedArgVia, UntypedAssignmentKind,
@@ -9,7 +9,7 @@ use crate::{
         UntypedPattern, UntypedRecordUpdateArg, Use, Validator, CAPTURE_VARIABLE,
     },
     docvec,
-    expr::{FnStyle, UntypedExpr, DEFAULT_ERROR_STR, DEFAULT_TODO_STR},
+    expr::{FnStyle, TypedExpr, UntypedExpr, DEFAULT_ERROR_STR, DEFAULT_TODO_STR},
     parser::{
         extra::{Comment, ModuleExtra},
         token::Base,
@@ -295,7 +295,7 @@ impl<'comments> Formatter<'comments> {
 
                 head.append(" =")
                     .append(break_("", " "))
-                    .append(self.const_expr(value))
+                    .append(self.expr(value, false))
                     .nest(INDENT)
                     .group()
             }
@@ -338,14 +338,32 @@ impl<'comments> Formatter<'comments> {
             })
     }
 
-    fn const_expr<'a>(&mut self, value: &'a Constant) -> Document<'a> {
+    pub fn docs_const_expr<'a>(&mut self, name: &'a str, value: &'a TypedExpr) -> Document<'a> {
+        let mut printer = tipo::pretty::Printer::new();
+        let doc = name
+            .to_doc()
+            .append(": ")
+            .append(printer.print(&value.tipo()));
+
+        // NOTE: Only display the full value for simple expressions.
+        let value = self.const_expr(value);
+        if value.is_empty() {
+            doc
+        } else {
+            doc.append(" = ").append(value)
+        }
+    }
+
+    pub fn const_expr<'a>(&mut self, value: &'a TypedExpr) -> Document<'a> {
         match value {
-            Constant::ByteArray {
+            TypedExpr::UInt { value, base, .. } => self.int(value, base),
+            TypedExpr::String { value, .. } => self.string(value),
+            TypedExpr::ByteArray {
                 bytes,
                 preferred_format,
                 ..
             } => self.bytearray(bytes, None, preferred_format),
-            Constant::CurvePoint {
+            TypedExpr::CurvePoint {
                 point,
                 preferred_format,
                 ..
@@ -354,18 +372,21 @@ impl<'comments> Formatter<'comments> {
                 Some(point.as_ref().into()),
                 preferred_format,
             ),
-            Constant::Int { value, base, .. } => self.int(value, base),
-            Constant::String { value, .. } => self.string(value),
+            TypedExpr::Tuple { elems, .. } => {
+                wrap_args(elems.iter().map(|e| (self.const_expr(e), false))).group()
+            }
+            TypedExpr::Pair { fst, snd, .. } => {
+                let elems = [fst, snd];
+                "Pair"
+                    .to_doc()
+                    .append(wrap_args(elems.iter().map(|e| (self.const_expr(e), false))).group())
+            }
+            TypedExpr::List { elements, .. } => {
+                wrap_args(elements.iter().map(|e| (self.const_expr(e), false))).group()
+            }
+            TypedExpr::Var { name, .. } => name.to_doc(),
+            _ => Document::Str(""),
         }
-    }
-
-    pub fn docs_const_expr<'a>(&mut self, name: &'a str, value: &'a Constant) -> Document<'a> {
-        let mut printer = tipo::pretty::Printer::new();
-        name.to_doc()
-            .append(": ")
-            .append(printer.print(&value.tipo()))
-            .append(" = ")
-            .append(self.const_expr(value))
     }
 
     fn documented_definition<'a>(&mut self, s: &'a UntypedDefinition) -> Document<'a> {
@@ -691,9 +712,9 @@ impl<'comments> Formatter<'comments> {
     ) -> Document<'a> {
         let args = wrap_args(args.iter().map(|e| (self.fn_arg(e), false))).group();
         let body = match body {
-            UntypedExpr::Trace { .. } | UntypedExpr::When { .. } => {
-                self.expr(body, true).force_break()
-            }
+            UntypedExpr::Trace { .. }
+            | UntypedExpr::When { .. }
+            | UntypedExpr::LogicalOpChain { .. } => self.expr(body, true).force_break(),
             _ => self.expr(body, true),
         };
 
@@ -864,7 +885,7 @@ impl<'comments> Formatter<'comments> {
             ByteArrayFormatPreference::Utf8String => nil()
                 .append("\"")
                 .append(Document::String(escape(
-                    &String::from_utf8(bytes.to_vec()).unwrap(),
+                    core::str::from_utf8(bytes).unwrap(),
                 )))
                 .append("\""),
         }
@@ -1247,7 +1268,7 @@ impl<'comments> Formatter<'comments> {
         final_else: &'a UntypedExpr,
     ) -> Document<'a> {
         let if_branches = self
-            .if_branch(break_("if", "if "), branches.first())
+            .if_branch(Document::Str("if "), branches.first())
             .append(join(
                 branches[1..].iter().map(|branch| {
                     self.if_branch(line().append(break_("} else if", "} else if ")), branch)
@@ -1302,14 +1323,11 @@ impl<'comments> Formatter<'comments> {
                             .group()
                     };
 
-                    break_("", " ")
-                        .append("is")
-                        .append(break_("", " "))
-                        .append(is)
+                    break_("", " ").append("is ").append(is)
                 }
                 None => nil(),
             })
-            .append(break_("{", " {"))
+            .append(Document::Str(" {"))
             .group();
 
         let if_body = line().append(self.expr(&branch.body, true)).nest(INDENT);
@@ -1857,16 +1875,18 @@ impl<'comments> Formatter<'comments> {
                 ..
             }
             | UntypedExpr::Sequence { .. }
-            | UntypedExpr::Assignment { .. } => " {"
-                .to_doc()
-                .append(line().append(self.expr(expr, true)).nest(INDENT).group())
-                .append(line())
-                .append("}")
-                .force_break(),
+            | UntypedExpr::Assignment { .. } => Document::Str(" {")
+                .append(break_("", " ").nest(INDENT))
+                .append(
+                    self.expr(expr, true)
+                        .nest(INDENT)
+                        .group()
+                        .append(line())
+                        .append("}")
+                        .force_break(),
+                ),
 
-            UntypedExpr::Fn { .. } | UntypedExpr::List { .. } => {
-                line().append(self.expr(expr, false)).nest(INDENT).group()
-            }
+            UntypedExpr::Fn { .. } => line().append(self.expr(expr, false)).nest(INDENT).group(),
 
             UntypedExpr::When { .. } => line().append(self.expr(expr, false)).nest(INDENT).group(),
 
@@ -1881,8 +1901,9 @@ impl<'comments> Formatter<'comments> {
         let space_before = self.pop_empty_lines(clause.location.start);
         let clause_doc = join(
             clause.patterns.iter().map(|p| self.pattern(p)),
-            " | ".to_doc(),
-        );
+            break_(" | ", " | "),
+        )
+        .group();
 
         if index == 0 {
             clause_doc
@@ -1950,6 +1971,7 @@ impl<'comments> Formatter<'comments> {
                     } else {
                         || break_(",", ", ")
                     };
+
                 let elements_document =
                     join(elements.iter().map(|e| self.pattern(e)), break_style());
                 let tail = tail.as_ref().map(|e| {
@@ -2002,7 +2024,17 @@ impl<'comments> Formatter<'comments> {
 
     fn wrap_unary_op<'a>(&mut self, expr: &'a UntypedExpr) -> Document<'a> {
         match expr {
-            UntypedExpr::BinOp { .. } => "(".to_doc().append(self.expr(expr, false)).append(")"),
+            UntypedExpr::Trace {
+                kind: TraceKind::Error,
+                ..
+            }
+            | UntypedExpr::Trace {
+                kind: TraceKind::Todo,
+                ..
+            }
+            | UntypedExpr::PipeLine { .. }
+            | UntypedExpr::BinOp { .. }
+            | UntypedExpr::UnOp { .. } => "(".to_doc().append(self.expr(expr, false)).append(")"),
             _ => self.wrap_expr(expr),
         }
     }

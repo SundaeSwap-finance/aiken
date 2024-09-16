@@ -30,6 +30,7 @@ pub enum TypedExpr {
         location: Span,
         tipo: Rc<Type>,
         value: String,
+        base: Base,
     },
 
     String {
@@ -42,12 +43,14 @@ pub enum TypedExpr {
         location: Span,
         tipo: Rc<Type>,
         bytes: Vec<u8>,
+        preferred_format: ByteArrayFormatPreference,
     },
 
     CurvePoint {
         location: Span,
         tipo: Rc<Type>,
         point: Box<Curve>,
+        preferred_format: ByteArrayFormatPreference,
     },
 
     Sequence {
@@ -207,20 +210,24 @@ impl TypedExpr {
         }
     }
 
-    pub fn let_(value: Self, pattern: TypedPattern, tipo: Rc<Type>) -> Self {
+    pub fn let_(value: Self, pattern: TypedPattern, tipo: Rc<Type>, location: Span) -> Self {
         TypedExpr::Assignment {
-            location: Span::empty(),
             tipo: tipo.clone(),
             value: value.into(),
             pattern,
             kind: AssignmentKind::let_(),
+            location,
         }
     }
 
     // Create an expect assignment, unless the target type is `Data`; then fallback to a let.
-    pub fn flexible_expect(value: Self, pattern: TypedPattern, tipo: Rc<Type>) -> Self {
+    pub fn flexible_expect(
+        value: Self,
+        pattern: TypedPattern,
+        tipo: Rc<Type>,
+        location: Span,
+    ) -> Self {
         TypedExpr::Assignment {
-            location: Span::empty(),
             tipo: tipo.clone(),
             value: value.into(),
             pattern,
@@ -229,12 +236,12 @@ impl TypedExpr {
             } else {
                 AssignmentKind::expect()
             },
+            location,
         }
     }
 
-    pub fn local_var(name: &str, tipo: Rc<Type>) -> Self {
+    pub fn local_var(name: &str, tipo: Rc<Type>, location: Span) -> Self {
         TypedExpr::Var {
-            location: Span::empty(),
             constructor: ValueConstructor {
                 public: true,
                 variant: ValueConstructorVariant::LocalVariable {
@@ -243,6 +250,7 @@ impl TypedExpr {
                 tipo: tipo.clone(),
             },
             name: name.to_string(),
+            location,
         }
     }
 
@@ -1055,11 +1063,20 @@ impl UntypedExpr {
                     value: from_pallas_bigint(i).to_string(),
                 }),
 
-                PlutusData::BoundedBytes(bytes) => Ok(UntypedExpr::ByteArray {
-                    location: Span::empty(),
-                    bytes: bytes.into(),
-                    preferred_format: ByteArrayFormatPreference::HexadecimalString,
-                }),
+                PlutusData::BoundedBytes(bytes) => {
+                    if tipo.is_string() {
+                        Ok(UntypedExpr::String {
+                            location: Span::empty(),
+                            value: String::from_utf8(bytes.to_vec()).expect("invalid UTF-8 string"),
+                        })
+                    } else {
+                        Ok(UntypedExpr::ByteArray {
+                            location: Span::empty(),
+                            bytes: bytes.into(),
+                            preferred_format: ByteArrayFormatPreference::HexadecimalString,
+                        })
+                    }
+                }
 
                 PlutusData::Array(args) => match tipo {
                     Type::App {
@@ -1130,6 +1147,13 @@ impl UntypedExpr {
                             ..
                         }) = lookup_data_type_by_tipo(data_types, tipo)
                         {
+                            if constructors.is_empty() {
+                                return Ok(UntypedExpr::Var {
+                                    location: Span::empty(),
+                                    name: "Data".to_string(),
+                                });
+                            }
+
                             let constructor = &constructors[ix];
 
                             typed_parameters

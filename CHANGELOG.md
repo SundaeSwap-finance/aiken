@@ -1,6 +1,62 @@
 # Changelog
 
-## v1.1.0 - UNRELEASED
+## v1.1.3 - UNRELEASED
+
+### Added
+
+- N/A
+
+### Changed
+
+- **aiken-project**: Fix documentation link-tree generation messing up with modules when re-inserting the same module. @KtorZ
+- **aiken-lang**: Fix formatter adding extra unnecessary newlines after literal lists clause values or assignments. @KtorZ
+- **aiken0lang**: Fix formatting of long multi-line if/is expressions. @KtorZ
+
+### Removed
+
+- N/A
+
+## v1.1.2 - 2024-09-13
+
+### Added
+
+- N/A
+
+### Changed
+
+- **aiken-lang**: Fix issues with static recursive optimization. See [#1009](https://github.com/aiken-lang/aiken/issues/1009) @Microproofs
+- **aiken-lang**: Aiken IR now interns variables while building up to ensure uniqueness for local vars. @Microproofs
+- **aiken-lang**: Fix reification of `Data` (failing to reify) & `PRNG` (missing variants' arguments). @KtorZ
+- **aiken-lang**: Adjust reification of `String` to be shown as plain UTF-8 text strings (instead of hex-encoded byte array). @KtorZ
+- **aiken-lang**: Fix formatting of long if-condition over multiline. @KtorZ & @Microproofs
+- **aiken-lang**: Fix formatting of standalone logical binary chains (`and` & `or`) in functions. @KtorZ
+- **uplc**: Fix script context generation failure on missing datum when evaluating transactions. @solidsnakedev
+
+### Removed
+
+- N/A
+
+## v1.1.1 - 2024-09-10
+
+### Added
+
+- N/A
+
+### Changed
+
+- **aiken-lang**: Fix validator's else handler generation. See [#1015](https://github.com/aiken-lang/aiken/issues/1015) @KtorZ
+- **aiken-lang**: Fix underflow in error message reported by the validator arity. See [#1013](https://github.com/aiken-lang/aiken/issues/1013) @KtorZ
+- **aiken-lang**: Fix list-pattern needlessly formatting over multiple lines. @KtorZ
+- **aiken-lang**: Fix formatter on long alternative patterns spanning over multiple lines. @KtorZ
+- **aiken-lang**: Fix needed parentheses under trace-if-false operator for todo, fail, unop & pipelines; removed when formatting. @KtorZ
+- **aiken-lang**: Fix formatter removing curly braces around multi-line constants. It's fine to not have curly braces, but it's the Aiken signature after all. @KtorZ
+- **aiken-lang**: Improve LSP suggestion for module imports. @Riley-Kilgore
+
+### Removed
+
+- N/A
+
+## v1.1.0 - 2024-09-03
 
 ### Added
 
@@ -26,9 +82,13 @@
 
 - **aiken-project**: modules starting with `@hidden` in their docs will be skipped from docs generation. @KtorZ
 
+- **aiken-project**: preserve type-aliases as titles in blueprint generated schemas. @KtorZ
+
 - **uplc**: support evaluation of Plutus V3 transactions, including new purposes introduced in Conway. @KtorZ
 
 ### Changed
+
+- **aiken-lang**: zero-arg functions are **no longer** evaluated at compile-time. However, constants can now hold _any_ expression and are fully evaluated at compile-time. Use `const` whenever a zero-arg function was used, unless you do want to defer execution. @KtorZ @MicroProofs.
 
 - **aiken-lang**: fix zero-arg builtins `mk_nil_data` and `mk_nil_pair_data` invokation. @KtorZ
 

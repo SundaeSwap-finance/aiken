@@ -161,6 +161,7 @@ impl TypedModule {
     pub fn register_definitions(
         &self,
         functions: &mut IndexMap<FunctionAccessKey, TypedFunction>,
+        constants: &mut IndexMap<FunctionAccessKey, TypedExpr>,
         data_types: &mut IndexMap<DataTypeKey, TypedDataType>,
     ) {
         for def in self.definitions() {
@@ -203,7 +204,17 @@ impl TypedModule {
                     }
                 }
 
-                Definition::TypeAlias(_) | Definition::ModuleConstant(_) | Definition::Use(_) => {}
+                Definition::ModuleConstant(ModuleConstant { name, value, .. }) => {
+                    constants.insert(
+                        FunctionAccessKey {
+                            module_name: self.name.clone(),
+                            function_name: name.clone(),
+                        },
+                        value.clone(),
+                    );
+                }
+
+                Definition::TypeAlias(_) | Definition::Use(_) => {}
             }
         }
     }
@@ -409,9 +420,13 @@ pub type TypedDataType = DataType<Rc<Type>>;
 
 impl TypedDataType {
     pub fn known_enum(name: &str, constructors: &[&str]) -> Self {
+        Self::known_data_type(name, &RecordConstructor::known_enum(constructors))
+    }
+
+    pub fn known_data_type(name: &str, constructors: &[RecordConstructor<Rc<Type>>]) -> Self {
         Self {
             name: name.to_string(),
-            constructors: RecordConstructor::known_enum(constructors),
+            constructors: constructors.to_vec(),
             location: Span::empty(),
             opaque: false,
             public: true,
@@ -459,18 +474,17 @@ pub struct Use<PackageName> {
     pub unqualified: Vec<UnqualifiedImport>,
 }
 
-pub type TypedModuleConstant = ModuleConstant<Rc<Type>>;
-pub type UntypedModuleConstant = ModuleConstant<()>;
+pub type TypedModuleConstant = ModuleConstant<TypedExpr>;
+pub type UntypedModuleConstant = ModuleConstant<UntypedExpr>;
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct ModuleConstant<T> {
+pub struct ModuleConstant<Expr> {
     pub doc: Option<String>,
     pub location: Span,
     pub public: bool,
     pub name: String,
     pub annotation: Option<Annotation>,
-    pub value: Box<Constant>,
-    pub tipo: T,
+    pub value: Expr,
 }
 
 pub type TypedValidator = Validator<Rc<Type>, TypedArg, TypedExpr>;
@@ -555,15 +569,15 @@ impl TypedValidator {
 
         TypedExpr::sequence(&[
             TypedExpr::let_(
-                TypedExpr::local_var(var_context, Type::script_context()),
+                TypedExpr::local_var(var_context, Type::script_context(), self.location),
                 TypedPattern::Constructor {
                     is_record: false,
                     location: Span::empty(),
                     name: well_known::SCRIPT_CONTEXT_CONSTRUCTORS[0].to_string(),
                     arguments: vec![
-                        CallArg::var(var_transaction),
-                        CallArg::var(var_redeemer),
-                        CallArg::var(var_purpose),
+                        CallArg::var(var_transaction, Span::empty()),
+                        CallArg::var(var_redeemer, Span::empty()),
+                        CallArg::var(var_purpose, Span::empty()),
                     ],
                     module: None,
                     constructor: PatternConstructor::Record {
@@ -577,11 +591,13 @@ impl TypedValidator {
                     ),
                 },
                 Type::script_context(),
+                Span::empty(),
             ),
             TypedExpr::When {
                 location: Span::empty(),
                 tipo: Type::bool(),
-                subject: TypedExpr::local_var(var_purpose, Type::script_purpose()).into(),
+                subject: TypedExpr::local_var(var_purpose, Type::script_purpose(), Span::empty())
+                    .into(),
                 clauses: self
                     .handlers
                     .iter()
@@ -602,12 +618,34 @@ impl TypedValidator {
                         let transaction = handler.arguments.last().unwrap();
 
                         let pattern = match handler.name.as_str() {
-                            "spend" => TypedPattern::spend_purpose(var_purpose_arg, var_datum),
-                            "mint" => TypedPattern::mint_purpose(var_purpose_arg),
-                            "withdraw" => TypedPattern::withdraw_purpose(var_purpose_arg),
-                            "publish" => TypedPattern::publish_purpose(var_purpose_arg),
-                            "propose" => TypedPattern::propose_purpose(var_purpose_arg),
-                            "vote" => TypedPattern::vote_purpose(var_purpose_arg),
+                            "spend" => TypedPattern::spend_purpose(
+                                (var_purpose_arg, purpose_arg.location),
+                                (
+                                    var_datum,
+                                    datum.map(|x| x.location).unwrap_or(Span::empty()),
+                                ),
+                                redeemer.location,
+                            ),
+                            "mint" => TypedPattern::mint_purpose(
+                                (var_purpose_arg, purpose_arg.location),
+                                redeemer.location,
+                            ),
+                            "withdraw" => TypedPattern::withdraw_purpose(
+                                (var_purpose_arg, purpose_arg.location),
+                                redeemer.location,
+                            ),
+                            "publish" => TypedPattern::publish_purpose(
+                                (var_purpose_arg, purpose_arg.location),
+                                redeemer.location,
+                            ),
+                            "propose" => TypedPattern::propose_purpose(
+                                (var_purpose_arg, purpose_arg.location),
+                                redeemer.location,
+                            ),
+                            "vote" => TypedPattern::vote_purpose(
+                                (var_purpose_arg, purpose_arg.location),
+                                redeemer.location,
+                            ),
                             purpose => {
                                 unreachable!("unexpected/unknown purpose: {:?}", purpose)
                             }
@@ -617,36 +655,52 @@ impl TypedValidator {
 
                         // expect redeemer: tipo = __redeemer__
                         then.push(TypedExpr::flexible_expect(
-                            TypedExpr::local_var(var_redeemer, Type::data()),
+                            TypedExpr::local_var(var_redeemer, Type::data(), redeemer.location),
                             TypedPattern::var(redeemer.get_variable_name().unwrap_or("_")),
                             redeemer.tipo.clone(),
+                            redeemer.location,
                         ));
 
                         // Cast the datum, if any
                         if let Some(datum) = datum {
                             // expect datum: tipo = __datum__
                             then.push(TypedExpr::flexible_expect(
-                                TypedExpr::local_var(var_datum, Type::option(Type::data())),
+                                TypedExpr::local_var(
+                                    var_datum,
+                                    Type::option(Type::data()),
+                                    datum.location,
+                                ),
                                 TypedPattern::var(datum.get_variable_name().unwrap_or("_")),
                                 datum.tipo.clone(),
+                                datum.location,
                             ))
                         }
 
                         // let purpose_arg = __purpose_arg__
                         if let Some(arg_name) = purpose_arg.get_variable_name() {
                             then.push(TypedExpr::let_(
-                                TypedExpr::local_var(var_purpose_arg, Type::data()),
+                                TypedExpr::local_var(
+                                    var_purpose_arg,
+                                    Type::data(),
+                                    purpose_arg.location,
+                                ),
                                 TypedPattern::var(arg_name),
                                 purpose_arg.tipo.clone(),
+                                purpose_arg.location,
                             ));
                         }
 
                         // let last_arg_name = __transaction__
                         if let Some(arg_name) = transaction.get_variable_name() {
                             then.push(TypedExpr::let_(
-                                TypedExpr::local_var(var_transaction, Type::data()),
+                                TypedExpr::local_var(
+                                    var_transaction,
+                                    Type::data(),
+                                    transaction.location,
+                                ),
                                 TypedPattern::var(arg_name),
                                 Type::data(),
+                                transaction.location,
                             ));
                         }
 
@@ -664,24 +718,30 @@ impl TypedValidator {
                     .chain(std::iter::once(&self.fallback).map(|fallback| {
                         let arg = fallback.arguments.first().unwrap();
 
-                        let then = &[
-                            TypedExpr::let_(
-                                TypedExpr::local_var(var_context, arg.tipo.clone()),
-                                arg.get_variable_name().map(TypedPattern::var).unwrap_or(
-                                    TypedPattern::Discard {
-                                        name: var_context.to_string(),
-                                        location: Span::empty(),
-                                    },
+                        let then = match arg.get_variable_name() {
+                            Some(arg_name) => TypedExpr::sequence(&[
+                                TypedExpr::let_(
+                                    TypedExpr::local_var(
+                                        var_context,
+                                        arg.tipo.clone(),
+                                        arg.location,
+                                    ),
+                                    TypedPattern::var(arg_name),
+                                    arg.tipo.clone(),
+                                    arg.location,
                                 ),
-                                arg.tipo.clone(),
-                            ),
-                            fallback.body.clone(),
-                        ];
+                                fallback.body.clone(),
+                            ]),
+                            None => fallback.body.clone(),
+                        };
 
                         TypedClause {
                             location: Span::empty(),
-                            pattern: TypedPattern::var(var_context),
-                            then: TypedExpr::sequence(then),
+                            pattern: TypedPattern::Discard {
+                                name: "_".to_string(),
+                                location: arg.location,
+                            },
+                            then,
                         }
                     }))
                     .collect(),
@@ -746,7 +806,7 @@ pub enum Definition<T, Arg, Expr, PackageName> {
 
     Use(Use<PackageName>),
 
-    ModuleConstant(ModuleConstant<T>),
+    ModuleConstant(ModuleConstant<Expr>),
 
     Test(Function<T, Expr, ArgVia<Arg, Expr>>),
 
@@ -843,55 +903,6 @@ pub struct DefinitionLocation<'module> {
     pub span: Span,
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub enum Constant {
-    Int {
-        location: Span,
-        value: String,
-        base: Base,
-    },
-
-    String {
-        location: Span,
-        value: String,
-    },
-
-    ByteArray {
-        location: Span,
-        bytes: Vec<u8>,
-        preferred_format: ByteArrayFormatPreference,
-    },
-
-    CurvePoint {
-        location: Span,
-        point: Box<Curve>,
-        preferred_format: ByteArrayFormatPreference,
-    },
-}
-
-impl Constant {
-    pub fn tipo(&self) -> Rc<Type> {
-        match self {
-            Constant::Int { .. } => Type::int(),
-            Constant::String { .. } => Type::string(),
-            Constant::ByteArray { .. } => Type::byte_array(),
-            Constant::CurvePoint { point, .. } => match point.as_ref() {
-                Curve::Bls12_381(Bls12_381Point::G1(_)) => Type::g1_element(),
-                Curve::Bls12_381(Bls12_381Point::G2(_)) => Type::g2_element(),
-            },
-        }
-    }
-
-    pub fn location(&self) -> Span {
-        match self {
-            Constant::Int { location, .. }
-            | Constant::String { location, .. }
-            | Constant::ByteArray { location, .. }
-            | Constant::CurvePoint { location, .. } => *location,
-        }
-    }
-}
-
 pub type TypedCallArg = CallArg<TypedExpr>;
 pub type ParsedCallArg = CallArg<Option<UntypedExpr>>;
 
@@ -918,12 +929,12 @@ impl TypedCallArg {
 }
 
 impl CallArg<TypedPattern> {
-    pub fn var(name: &str) -> Self {
+    pub fn var(name: &str, location: Span) -> Self {
         CallArg {
             label: None,
             location: Span::empty(),
             value: TypedPattern::Var {
-                location: Span::empty(),
+                location,
                 name: name.to_string(),
             },
         }
@@ -939,7 +950,10 @@ pub struct RecordConstructor<T> {
     pub sugar: bool,
 }
 
-impl<A> RecordConstructor<A> {
+impl<A> RecordConstructor<A>
+where
+    A: Clone,
+{
     pub fn put_doc(&mut self, new_doc: String) {
         self.doc = Some(new_doc);
     }
@@ -955,6 +969,16 @@ impl<A> RecordConstructor<A> {
                 sugar: false,
             })
             .collect()
+    }
+
+    pub fn known_record(name: &str, args: &[RecordConstructorArg<A>]) -> Self {
+        RecordConstructor {
+            location: Span::empty(),
+            name: name.to_string(),
+            arguments: args.to_vec(),
+            doc: None,
+            sugar: false,
+        }
     }
 }
 
@@ -1298,6 +1322,19 @@ impl Annotation {
         }
     }
 
+    pub fn list(inner: Annotation, location: Span) -> Self {
+        Annotation::Constructor {
+            name: "List".to_string(),
+            module: None,
+            arguments: vec![inner],
+            location,
+        }
+    }
+
+    pub fn tuple(elems: Vec<Annotation>, location: Span) -> Self {
+        Annotation::Tuple { elems, location }
+    }
+
     pub fn is_logically_equal(&self, other: &Annotation) -> bool {
         match self {
             Annotation::Constructor {
@@ -1482,10 +1519,15 @@ impl TypedPattern {
         }
     }
 
-    pub fn constructor(name: &str, arguments: &[CallArg<TypedPattern>], tipo: Rc<Type>) -> Self {
+    pub fn constructor(
+        name: &str,
+        arguments: &[CallArg<TypedPattern>],
+        tipo: Rc<Type>,
+        location: Span,
+    ) -> Self {
         TypedPattern::Constructor {
             is_record: false,
-            location: Span::empty(),
+            location,
             name: name.to_string(),
             arguments: arguments.to_vec(),
             module: None,
@@ -1498,60 +1540,88 @@ impl TypedPattern {
         }
     }
 
-    pub fn mint_purpose(var_purpose_arg: &str) -> Self {
+    pub fn mint_purpose(
+        (var_purpose_arg, purpose_span): (&str, Span),
+        redeemer_span: Span,
+    ) -> Self {
         TypedPattern::constructor(
             well_known::SCRIPT_PURPOSE_MINT,
-            &[CallArg::var(var_purpose_arg)],
+            &[CallArg::var(var_purpose_arg, purpose_span)],
             Type::function(vec![Type::byte_array()], Type::script_purpose()),
+            redeemer_span,
         )
     }
 
-    pub fn spend_purpose(var_purpose_arg: &str, var_datum: &str) -> Self {
+    pub fn spend_purpose(
+        (var_purpose_arg, purpose_span): (&str, Span),
+        (var_datum, datum_span): (&str, Span),
+        redeemer_span: Span,
+    ) -> Self {
         TypedPattern::constructor(
             well_known::SCRIPT_PURPOSE_SPEND,
-            &[CallArg::var(var_purpose_arg), CallArg::var(var_datum)],
+            &[
+                CallArg::var(var_purpose_arg, purpose_span),
+                CallArg::var(var_datum, datum_span),
+            ],
             Type::function(
                 vec![Type::data(), Type::option(Type::data())],
                 Type::script_purpose(),
             ),
+            redeemer_span,
         )
     }
 
-    pub fn withdraw_purpose(var_purpose_arg: &str) -> Self {
+    pub fn withdraw_purpose(
+        (var_purpose_arg, purpose_span): (&str, Span),
+        redeemer_span: Span,
+    ) -> Self {
         TypedPattern::constructor(
             well_known::SCRIPT_PURPOSE_WITHDRAW,
-            &[CallArg::var(var_purpose_arg)],
+            &[CallArg::var(var_purpose_arg, purpose_span)],
             Type::function(vec![Type::data()], Type::script_purpose()),
+            redeemer_span,
         )
     }
 
-    pub fn publish_purpose(var_purpose_arg: &str) -> Self {
+    pub fn publish_purpose(
+        (var_purpose_arg, purpose_span): (&str, Span),
+        redeemer_span: Span,
+    ) -> Self {
         TypedPattern::constructor(
             well_known::SCRIPT_PURPOSE_PUBLISH,
             &[
-                CallArg::var("__discarded_purpose_ix__"),
-                CallArg::var(var_purpose_arg),
+                CallArg::var("__discarded_purpose_ix__", purpose_span),
+                CallArg::var(var_purpose_arg, purpose_span),
             ],
             Type::function(vec![Type::int(), Type::data()], Type::script_purpose()),
+            redeemer_span,
         )
     }
 
-    pub fn vote_purpose(var_purpose_arg: &str) -> Self {
+    pub fn vote_purpose(
+        (var_purpose_arg, purpose_span): (&str, Span),
+        redeemer_span: Span,
+    ) -> Self {
         TypedPattern::constructor(
             well_known::SCRIPT_PURPOSE_VOTE,
-            &[CallArg::var(var_purpose_arg)],
+            &[CallArg::var(var_purpose_arg, purpose_span)],
             Type::function(vec![Type::data()], Type::script_purpose()),
+            redeemer_span,
         )
     }
 
-    pub fn propose_purpose(var_purpose_arg: &str) -> Self {
+    pub fn propose_purpose(
+        (var_purpose_arg, purpose_span): (&str, Span),
+        redeemer_span: Span,
+    ) -> Self {
         TypedPattern::constructor(
             well_known::SCRIPT_PURPOSE_PROPOSE,
             &[
-                CallArg::var("__discarded_purpose_ix__"),
-                CallArg::var(var_purpose_arg),
+                CallArg::var("__discarded_purpose_ix__", purpose_span),
+                CallArg::var(var_purpose_arg, purpose_span),
             ],
             Type::function(vec![Type::int(), Type::data()], Type::script_purpose()),
+            redeemer_span,
         )
     }
 }
