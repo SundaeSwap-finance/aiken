@@ -1,12 +1,12 @@
 use std::{borrow::Borrow, collections::BTreeMap, rc::Rc};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use uplc::{
     ast::{Constant, DeBruijn, Name, Program, Term},
     builtins::DefaultFunction,
 };
 
-#[derive(Debug, PartialEq, Default, Clone, Serialize)]
+#[derive(Debug, PartialEq, Default, Clone, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct SourceMap {
     locations: BTreeMap<u64, String>,
@@ -31,6 +31,10 @@ impl SourceMap {
         };
 
         (Self { locations }, new_program.try_into().unwrap())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.locations.is_empty()
     }
 }
 

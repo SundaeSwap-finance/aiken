@@ -24,6 +24,6 @@ pub enum CodeGenMode {
         seed: u32,
         property_max_success: usize,
     },
-    Build(bool),
+    Build(bool, bool),
     NoOp,
 }

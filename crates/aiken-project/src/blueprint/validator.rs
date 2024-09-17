@@ -45,7 +45,7 @@ pub struct Validator {
     #[serde(default)]
     pub definitions: Definitions<Annotated<Schema>>,
 
-    #[serde(skip)]
+    #[serde(skip_serializing_if = "SourceMap::is_empty")]
     pub source_map: SourceMap,
 }
 
