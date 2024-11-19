@@ -24,6 +24,16 @@ impl From<bool> for ExpectLevel {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum FunctionVariants {
+    Standard(Vec<String>),
+    Recursive {
+        params: Vec<String>,
+        recursive_nonstatic_params: Vec<String>,
+    },
+    Cyclic(Vec<Vec<String>>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum Air {
     // Primitives
     Int {
@@ -67,17 +77,8 @@ pub enum Air {
     DefineFunc {
         func_name: String,
         module_name: String,
-        params: Vec<String>,
-        recursive: bool,
-        recursive_nonstatic_params: Vec<String>,
         variant_name: String,
-    },
-    DefineCyclicFuncs {
-        func_name: String,
-        module_name: String,
-        variant_name: String,
-        // just the params
-        contained_functions: Vec<Vec<String>>,
+        variant: FunctionVariants,
     },
     Fn {
         params: Vec<String>,
@@ -112,9 +113,6 @@ pub enum Air {
     CastToData {
         tipo: Rc<Type>,
     },
-    AssertConstr {
-        constr_index: usize,
-    },
     AssertBool {
         is_true: bool,
     },
@@ -127,13 +125,11 @@ pub enum Air {
     Clause {
         subject_tipo: Rc<Type>,
         subject_name: String,
-        complex_clause: bool,
     },
     ListClause {
         subject_tipo: Rc<Type>,
         tail_name: String,
         next_tail_name: Option<(String, String)>,
-        complex_clause: bool,
     },
     WrapClause,
     TupleClause {
@@ -199,23 +195,21 @@ pub enum Air {
         tail: bool,
         expect_level: ExpectLevel,
     },
-    ListExpose {
-        tipo: Rc<Type>,
-        tail_head_names: Vec<(String, String)>,
-        tail: Option<(String, String)>,
-    },
     // Tuple Access
     TupleAccessor {
         names: Vec<String>,
         tipo: Rc<Type>,
         is_expect: bool,
     },
-    // Tuple Access
+    // Pair Access
     PairAccessor {
         fst: Option<String>,
         snd: Option<String>,
         tipo: Rc<Type>,
         is_expect: bool,
+    },
+    ExtractField {
+        tipo: Rc<Type>,
     },
     // Misc.
     ErrorTerm {
@@ -228,8 +222,4 @@ pub enum Air {
     NoOp,
     FieldsEmpty,
     ListEmpty,
-    MultiValidator {
-        two_arg_name: String,
-        three_arg_name: String,
-    },
 }

@@ -3,7 +3,7 @@ use super::{
     error::Error,
     memo_program::MemoProgram,
     parameter::Parameter,
-    schema::{Annotated, Schema},
+    schema::{Annotated, Data, Declaration, Schema},
 };
 use crate::module::{CheckedModule, CheckedModules};
 use aiken_lang::{
@@ -115,7 +115,7 @@ impl Validator {
                 )
                 .map(|schema| Parameter {
                     title: Some(param.arg_name.get_label()),
-                    schema,
+                    schema: Declaration::Referenced(schema),
                 })
                 .map_err(|error| Error::Schema {
                     error,
@@ -177,7 +177,7 @@ impl Validator {
                 .transpose()?
                 .map(|schema| Parameter {
                     title: datum.map(|datum| datum.arg_name.get_label()),
-                    schema,
+                    schema: Declaration::Referenced(schema),
                 });
 
             let redeemer = Annotated::from_type(
@@ -195,13 +195,17 @@ impl Validator {
             })
             .map(|schema| Parameter {
                 title: Some(redeemer.arg_name.get_label()),
-                schema,
+                schema: Declaration::Referenced(schema),
             })?;
 
             (datum, Some(redeemer))
         };
 
         let (source_map, program) = SourceMap::extract(program.get(generator, def, &module.name));
+        let redeemer = redeemer.or(Some(Parameter {
+            title: None,
+            schema: Declaration::Inline(Box::new(Schema::Data(Data::Opaque))),
+        }));
 
         Ok(Validator {
             title: format!("{}.{}.{}", &module.name, &def.name, &func.name,),
@@ -273,20 +277,27 @@ impl Validator {
         match self.parameters.split_first() {
             None => Err(Error::NoParametersToApply),
             Some((head, _)) => {
-                let schema = definitions
-                    .lookup(&head.schema)
-                    .map(|s| {
-                        Ok(Annotated {
-                            title: s.title.clone().or_else(|| head.title.clone()),
-                            description: s.description.clone(),
-                            annotated: s.annotated.clone(),
+                let schema = match &head.schema {
+                    Declaration::Inline(schema) => Annotated {
+                        title: head.title.clone(),
+                        description: None,
+                        annotated: schema.as_ref().clone(),
+                    },
+                    Declaration::Referenced(ref link) => definitions
+                        .lookup(link)
+                        .map(|s| {
+                            Ok(Annotated {
+                                title: s.title.clone().or_else(|| head.title.clone()),
+                                description: s.description.clone(),
+                                annotated: s.annotated.clone(),
+                            })
                         })
-                    })
-                    .unwrap_or_else(|| {
-                        Err(Error::UnresolvedSchemaReference {
-                            reference: head.schema.clone(),
-                        })
-                    })?;
+                        .unwrap_or_else(|| {
+                            Err(Error::UnresolvedSchemaReference {
+                                reference: link.clone(),
+                            })
+                        })?,
+                };
 
                 let data = ask(&schema, definitions)?;
 
@@ -732,6 +743,19 @@ mod tests {
     }
 
     #[test]
+    fn else_redeemer() {
+        assert_validator!(
+            r#"
+            validator always_true {
+              else(_) {
+                True
+              }
+            }
+            "#
+        );
+    }
+
+    #[test]
     fn validate_arguments_integer() {
         let definitions = fixture_definitions();
 
@@ -739,7 +763,7 @@ mod tests {
 
         let param = Parameter {
             title: None,
-            schema: Reference::new("Int"),
+            schema: Declaration::Referenced(Reference::new("Int")),
         };
 
         assert!(matches!(param.validate(&definitions, &term), Ok { .. }))
@@ -753,7 +777,7 @@ mod tests {
 
         let param = Parameter {
             title: None,
-            schema: Reference::new("ByteArray"),
+            schema: Declaration::Referenced(Reference::new("ByteArray")),
         };
 
         assert!(matches!(param.validate(&definitions, &term), Ok { .. }))

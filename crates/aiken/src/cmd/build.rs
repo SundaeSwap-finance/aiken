@@ -25,6 +25,18 @@ pub struct Args {
     #[clap(long)]
     env: Option<String>,
 
+    /// Optional relative filepath to the generated Plutus blueprint.
+    ///
+    /// [default: plutus.json]
+    #[clap(
+        short,
+        long("out"),
+        value_parser,
+        value_name = "FILEPATH",
+        verbatim_doc_comment
+    )]
+    output: Option<PathBuf>,
+
     /// Filter traces to be included in the generated program(s).
     ///
     ///   - user-defined:
@@ -40,8 +52,8 @@ pub struct Args {
     ///       include both user-defined and compiler-generated traces.
     ///
     /// [optional] [default: all]
-    #[clap(short, long, value_parser=filter_traces_parser(), default_missing_value="all", verbatim_doc_comment)]
-    filter_traces: Option<fn(TraceLevel) -> Tracing>,
+    #[clap(short = 'f', long, value_parser=trace_filter_parser(), default_missing_value="all", verbatim_doc_comment, alias="filter_traces")]
+    trace_filter: Option<fn(TraceLevel) -> Tracing>,
 
     /// Choose the verbosity level of traces:
     ///
@@ -69,8 +81,9 @@ pub fn exec(
         deny,
         watch,
         uplc,
-        filter_traces,
+        trace_filter,
         trace_level,
+        output,
         env,
         source_map,
     }: Args,
@@ -80,22 +93,24 @@ pub fn exec(
             p.build(
                 uplc,
                 source_map,
-                match filter_traces {
-                    Some(filter_traces) => filter_traces(trace_level),
+                match trace_filter {
+                    Some(trace_filter) => trace_filter(trace_level),
                     None => Tracing::All(trace_level),
                 },
+                p.blueprint_path(output.as_deref()),
                 env.clone(),
             )
         })
     } else {
-        with_project(directory.as_deref(), deny, |p| {
+        with_project(directory.as_deref(), deny, false, |p| {
             p.build(
                 uplc,
                 source_map,
-                match filter_traces {
-                    Some(filter_traces) => filter_traces(trace_level),
+                match trace_filter {
+                    Some(trace_filter) => trace_filter(trace_level),
                     None => Tracing::All(trace_level),
                 },
+                p.blueprint_path(output.as_deref()),
                 env.clone(),
             )
         })
@@ -105,7 +120,7 @@ pub fn exec(
 }
 
 #[allow(clippy::type_complexity)]
-pub fn filter_traces_parser(
+pub fn trace_filter_parser(
 ) -> MapValueParser<PossibleValuesParser, fn(String) -> fn(TraceLevel) -> Tracing> {
     PossibleValuesParser::new(["user-defined", "compiler-generated", "all"]).map(
         |s: String| match s.as_str() {

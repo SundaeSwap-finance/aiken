@@ -32,6 +32,7 @@ use std::{
 };
 use vec1::Vec1;
 
+#[allow(clippy::result_large_err)]
 pub(crate) fn infer_function(
     fun: &UntypedFunction,
     module_name: &str,
@@ -246,6 +247,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         }
     }
 
+    #[allow(clippy::result_large_err)]
     fn check_when_exhaustiveness(
         &mut self,
         typed_clauses: &[TypedClause],
@@ -265,6 +267,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         Ok(())
     }
 
+    #[allow(clippy::result_large_err)]
     pub fn do_infer_call(
         &mut self,
         fun: UntypedExpr,
@@ -278,6 +281,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         Ok((fun, args, typ))
     }
 
+    #[allow(clippy::result_large_err)]
     pub fn do_infer_call_with_known_fun<F>(
         &mut self,
         fun: TypedExpr,
@@ -334,6 +338,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         Ok((fun, arguments, return_type))
     }
 
+    #[allow(clippy::result_large_err)]
     pub fn do_infer_fn(
         &mut self,
         args: Vec<UntypedArg>,
@@ -386,6 +391,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         self.infer_fn_with_known_types(arguments, body, return_type)
     }
 
+    #[allow(clippy::result_large_err)]
     fn get_field_map(
         &mut self,
         constructor: &TypedExpr,
@@ -426,6 +432,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
 
     /// Crawl the AST, annotating each node with the inferred type or
     /// returning an error.
+    #[allow(clippy::result_large_err)]
     pub fn infer(&mut self, expr: UntypedExpr) -> Result<TypedExpr, Error> {
         match expr {
             UntypedExpr::ErrorTerm { location } => Ok(self.infer_error_term(location)),
@@ -573,6 +580,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         }
     }
 
+    #[allow(clippy::result_large_err)]
     fn infer_bytearray(
         &mut self,
         bytes: Vec<u8>,
@@ -597,6 +605,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         })
     }
 
+    #[allow(clippy::result_large_err)]
     fn infer_curve_point(
         &mut self,
         curve: Curve,
@@ -618,6 +627,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         })
     }
 
+    #[allow(clippy::result_large_err)]
     fn infer_trace_if_false(
         &mut self,
         value: UntypedExpr,
@@ -701,6 +711,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         }
     }
 
+    #[allow(clippy::result_large_err)]
     fn infer_binop(
         &mut self,
         name: BinOp,
@@ -771,6 +782,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         })
     }
 
+    #[allow(clippy::result_large_err)]
     fn infer_record_update(
         &mut self,
         constructor: UntypedExpr,
@@ -897,6 +909,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         })
     }
 
+    #[allow(clippy::result_large_err)]
     fn infer_un_op(
         &mut self,
         location: Span,
@@ -964,12 +977,12 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
                             let has_validator = info
                                 .values
                                 .keys()
-                                .any(|k| k.split(".").next() == Some(name));
+                                .any(|k| k.split('.').next() == Some(name));
 
                             let value_constructors = info
                                 .values
                                 .keys()
-                                .map(|k| k.split(".").next().unwrap_or(k).to_string())
+                                .map(|k| k.split('.').next().unwrap_or(k).to_string())
                                 .collect::<Vec<_>>();
 
                             return Some(
@@ -1035,6 +1048,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         None
     }
 
+    #[allow(clippy::result_large_err)]
     fn infer_field_access(
         &mut self,
         container: UntypedExpr,
@@ -1077,6 +1091,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         }
     }
 
+    #[allow(clippy::result_large_err)]
     fn infer_module_access(
         &mut self,
         module_alias: &str,
@@ -1145,6 +1160,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         })
     }
 
+    #[allow(clippy::result_large_err)]
     fn infer_record_access(
         &mut self,
         record: UntypedExpr,
@@ -1157,6 +1173,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         self.infer_known_record_access(record, label, location)
     }
 
+    #[allow(clippy::result_large_err)]
     fn infer_known_record_access(
         &mut self,
         record: TypedExpr,
@@ -1244,6 +1261,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         })
     }
 
+    #[allow(clippy::result_large_err)]
     fn infer_param(
         &mut self,
         untyped_arg: UntypedArg,
@@ -1288,6 +1306,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         Ok((typed_arg, extra_assignment))
     }
 
+    #[allow(clippy::result_large_err)]
     pub fn infer_assignment(
         &mut self,
         untyped_pattern: UntypedPattern,
@@ -1388,7 +1407,36 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         // If `expect` is explicitly used, we still check exhaustiveness but instead of returning an
         // error we emit a warning which explains that using `expect` is unnecessary.
         match kind {
-            AssignmentKind::Is => (),
+            AssignmentKind::Is => {
+                let pattern_var_name = match pattern {
+                    Pattern::Var { ref name, .. } => Some(name),
+                    _ => None,
+                };
+
+                let value_var_name = match typed_value {
+                    TypedExpr::Var { ref name, .. } => Some(name),
+                    _ => None,
+                };
+
+                // In case where we have no explicit pattern, we end up introducing a new let
+                // binding with the same name as the value. However, the assigned value may not
+                // necessarily be used, resulting in an annoying warning when one only wants to
+                // assert a type.
+                //
+                // if foo is Int { // foo is unused here but shouldn't generated warnings.
+                //   True
+                // } else {
+                //   False
+                // }
+                //
+                // The following check removes the warning by marking the new let-binding as used
+                // in this particular context.
+                if let Some(pattern_var_name) = pattern_var_name {
+                    if Some(pattern_var_name) == value_var_name {
+                        self.environment.increment_usage(pattern_var_name);
+                    }
+                }
+            }
             AssignmentKind::Let { .. } => {
                 self.environment
                     .check_exhaustiveness(&[&pattern], location, true)?
@@ -1453,6 +1501,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         })
     }
 
+    #[allow(clippy::result_large_err)]
     fn infer_call(
         &mut self,
         fun: UntypedExpr,
@@ -1471,6 +1520,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         })
     }
 
+    #[allow(clippy::result_large_err)]
     fn infer_call_argument(
         &mut self,
         value: UntypedExpr,
@@ -1519,6 +1569,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         Ok(value)
     }
 
+    #[allow(clippy::result_large_err)]
     fn infer_clause(
         &mut self,
         clause: UntypedClause,
@@ -1536,10 +1587,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
             let then = if let Some(filler) =
                 recover_from_no_assignment(assert_no_assignment(&then), then.location())?
             {
-                TypedExpr::Sequence {
-                    location,
-                    expressions: vec![scope.infer(then)?, filler],
-                }
+                scope.infer(then)?.and_then(filler)
             } else {
                 scope.infer(then)?
             };
@@ -1557,6 +1605,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
             .collect())
     }
 
+    #[allow(clippy::result_large_err)]
     fn infer_clause_pattern(
         &mut self,
         patterns: Vec1<UntypedPattern>,
@@ -1578,6 +1627,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         Ok(typed_patterns)
     }
 
+    #[allow(clippy::result_large_err)]
     fn infer_if(
         &mut self,
         branches: Vec1<UntypedIfBranch>,
@@ -1609,10 +1659,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         let typed_final_else = if let Some(filler) =
             recover_from_no_assignment(assert_no_assignment(&final_else), final_else.location())?
         {
-            TypedExpr::Sequence {
-                location: final_else.location(),
-                expressions: vec![self.infer(final_else)?, filler],
-            }
+            self.infer(final_else)?.and_then(filler)
         } else {
             self.infer(final_else)?
         };
@@ -1632,6 +1679,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         })
     }
 
+    #[allow(clippy::result_large_err)]
     fn infer_if_branch(&mut self, branch: UntypedIfBranch) -> Result<TypedIfBranch, Error> {
         let (condition, body, is) = match branch.is {
             Some(is) => self.in_new_scope(|typer| {
@@ -1667,10 +1715,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
                     assert_no_assignment(&branch.body),
                     branch.body.location(),
                 )? {
-                    TypedExpr::Sequence {
-                        location: branch.body.location(),
-                        expressions: vec![typer.infer(branch.body.clone())?, filler],
-                    }
+                    typer.infer(branch.body.clone())?.and_then(filler)
                 } else {
                     typer.infer(branch.body.clone())?
                 };
@@ -1691,10 +1736,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
                     assert_no_assignment(&branch.body),
                     branch.body.location(),
                 )? {
-                    TypedExpr::Sequence {
-                        location: branch.body.location(),
-                        expressions: vec![self.infer(branch.body.clone())?, filler],
-                    }
+                    self.infer(branch.body.clone())?.and_then(filler)
                 } else {
                     self.infer(branch.body.clone())?
                 };
@@ -1711,6 +1753,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         })
     }
 
+    #[allow(clippy::result_large_err)]
     pub fn infer_fn(
         &mut self,
         args: Vec<UntypedArg>,
@@ -1737,6 +1780,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         })
     }
 
+    #[allow(clippy::result_large_err)]
     pub fn infer_fn_with_known_types(
         &mut self,
         args: Vec<TypedArg>,
@@ -1786,10 +1830,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
             body_infer.map_err(|e| e.with_unify_error_rigid_names(&body_rigid_names));
 
         let body = if let Some(filler) = recover_from_no_assignment(no_assignment, location)? {
-            TypedExpr::Sequence {
-                location,
-                expressions: vec![inferred_body?, filler],
-            }
+            inferred_body?.and_then(filler)
         } else {
             inferred_body?
         };
@@ -1828,6 +1869,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         }
     }
 
+    #[allow(clippy::result_large_err)]
     fn infer_list(
         &mut self,
         elements: Vec<UntypedExpr>,
@@ -1873,6 +1915,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         })
     }
 
+    #[allow(clippy::result_large_err)]
     fn infer_logical_op_chain(
         &mut self,
         kind: LogicalOpChainKind,
@@ -1920,6 +1963,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         Ok(chain)
     }
 
+    #[allow(clippy::result_large_err)]
     fn infer_pipeline(&mut self, expressions: Vec1<UntypedExpr>) -> Result<TypedExpr, Error> {
         PipeTyper::infer(self, expressions)
     }
@@ -2118,6 +2162,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         }
     }
 
+    #[allow(clippy::result_large_err)]
     fn infer_seq(&mut self, location: Span, untyped: Vec<UntypedExpr>) -> Result<TypedExpr, Error> {
         // Search for backpassing.
         let mut breakpoint = None;
@@ -2177,8 +2222,12 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
                         if let Some(filler) =
                             recover_from_no_assignment(no_assignment, typed_expression.location())?
                         {
-                            expressions.push(typed_expression);
-                            expressions.push(filler);
+                            match typed_expression.and_then(filler) {
+                                TypedExpr::Sequence {
+                                    expressions: seq, ..
+                                } => expressions.extend(seq),
+                                trace => expressions.push(trace),
+                            }
                         } else {
                             expressions.push(typed_expression);
                         }
@@ -2234,6 +2283,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         }
     }
 
+    #[allow(clippy::result_large_err)]
     fn infer_pair(
         &mut self,
         fst: UntypedExpr,
@@ -2254,6 +2304,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         })
     }
 
+    #[allow(clippy::result_large_err)]
     fn infer_tuple(&mut self, elems: Vec<UntypedExpr>, location: Span) -> Result<TypedExpr, Error> {
         let mut typed_elems = vec![];
 
@@ -2275,6 +2326,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         })
     }
 
+    #[allow(clippy::result_large_err)]
     fn infer_tuple_index(
         &mut self,
         tuple_or_pair: UntypedExpr,
@@ -2332,6 +2384,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         TypedExpr::ErrorTerm { location, tipo }
     }
 
+    #[allow(clippy::result_large_err)]
     fn infer_trace_arg(&mut self, arg: UntypedExpr) -> Result<TypedExpr, Error> {
         let typed_arg = self.infer(arg)?;
         match self.unify(
@@ -2348,6 +2401,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         }
     }
 
+    #[allow(clippy::result_large_err)]
     fn infer_trace(
         &mut self,
         kind: TraceKind,
@@ -2362,6 +2416,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
             .collect::<Result<Vec<_>, Error>>()?;
 
         let then = self.infer(then)?;
+
         let tipo = then.tipo();
 
         if let TraceKind::Todo = kind {
@@ -2412,6 +2467,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         }
     }
 
+    #[allow(clippy::result_large_err)]
     pub fn infer_value_constructor(
         &mut self,
         module: &Option<String>,
@@ -2515,6 +2571,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         })
     }
 
+    #[allow(clippy::result_large_err)]
     fn infer_var(&mut self, name: String, location: Span) -> Result<TypedExpr, Error> {
         let constructor = self.infer_value_constructor(&None, &name, &location)?;
 
@@ -2525,6 +2582,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         })
     }
 
+    #[allow(clippy::result_large_err)]
     fn infer_when(
         &mut self,
         subject: UntypedExpr,
@@ -2585,6 +2643,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         })
     }
 
+    #[allow(clippy::result_large_err)]
     fn instantiate(
         &mut self,
         t: Rc<Type>,
@@ -2596,15 +2655,18 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         Ok(result)
     }
 
+    #[allow(clippy::result_large_err)]
     pub fn new_unbound_var(&mut self) -> Rc<Type> {
         self.environment.new_unbound_var()
     }
 
+    #[allow(clippy::result_large_err)]
     pub fn type_from_annotation(&mut self, annotation: &Annotation) -> Result<Rc<Type>, Error> {
         self.hydrator
             .type_from_annotation(annotation, self.environment)
     }
 
+    #[allow(clippy::result_large_err)]
     fn unify(
         &mut self,
         t1: Rc<Type>,
@@ -2616,6 +2678,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
     }
 }
 
+#[allow(clippy::result_large_err)]
 fn recover_from_no_assignment(
     result: Result<(), Error>,
     span: Span,
@@ -2634,6 +2697,7 @@ fn recover_from_no_assignment(
     result.map(|()| None)
 }
 
+#[allow(clippy::result_large_err)]
 fn assert_no_assignment(expr: &UntypedExpr) -> Result<(), Error> {
     match expr {
         UntypedExpr::Assignment {
@@ -2673,6 +2737,7 @@ fn assert_no_assignment(expr: &UntypedExpr) -> Result<(), Error> {
     }
 }
 
+#[allow(clippy::result_large_err)]
 fn assert_assignment(expr: TypedExpr) -> Result<TypedExpr, Error> {
     if !matches!(expr, TypedExpr::Assignment { .. }) {
         if expr.tipo().is_void() {
@@ -2705,6 +2770,7 @@ fn assert_assignment(expr: TypedExpr) -> Result<TypedExpr, Error> {
     Ok(expr)
 }
 
+#[allow(clippy::result_large_err)]
 pub fn ensure_serialisable(is_top_level: bool, t: Rc<Type>, location: Span) -> Result<(), Error> {
     match t.deref() {
         Type::App {

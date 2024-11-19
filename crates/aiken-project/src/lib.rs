@@ -193,17 +193,26 @@ where
         self.defined_modules = checkpoint.defined_modules;
     }
 
+    pub fn blueprint_path(&self, filepath: Option<&Path>) -> PathBuf {
+        match filepath {
+            Some(filepath) => filepath.to_path_buf(),
+            None => self.root.join(Options::default().blueprint_path),
+        }
+    }
+
     pub fn build(
         &mut self,
         uplc: bool,
         source_map: bool,
         tracing: Tracing,
+        blueprint_path: PathBuf,
         env: Option<String>,
     ) -> Result<(), Vec<Error>> {
         let options = Options {
             code_gen_mode: CodeGenMode::Build(uplc, source_map),
             tracing,
             env,
+            blueprint_path,
         };
 
         self.compile(options)
@@ -284,6 +293,7 @@ where
                     property_max_success,
                 }
             },
+            blueprint_path: self.blueprint_path(None),
         };
 
         self.compile(options)
@@ -321,10 +331,6 @@ where
         }
 
         Ok(())
-    }
-
-    pub fn blueprint_path(&self) -> PathBuf {
-        self.root.join("plutus.json")
     }
 
     fn config_definitions(&mut self, env: Option<&str>) -> Option<Vec<UntypedDefinition>> {
@@ -375,7 +381,7 @@ where
             CodeGenMode::Build(uplc_dump, source_maps) => {
                 self.event_listener
                     .handle_event(Event::GeneratingBlueprint {
-                        path: self.blueprint_path(),
+                        path: options.blueprint_path.clone(),
                     });
 
                 self.checked_modules.values_mut().for_each(|m| {
@@ -397,10 +403,10 @@ where
 
                 let json = serde_json::to_string_pretty(&blueprint).unwrap();
 
-                fs::write(self.blueprint_path(), json).map_err(|error| {
+                fs::write(options.blueprint_path.as_path(), json).map_err(|error| {
                     Error::FileIo {
                         error,
-                        path: self.blueprint_path(),
+                        path: options.blueprint_path,
                     }
                     .into()
                 })
@@ -458,8 +464,10 @@ where
 
     pub fn address(
         &self,
-        title: Option<&String>,
-        stake_address: Option<&String>,
+        module_name: Option<&str>,
+        validator_name: Option<&str>,
+        stake_address: Option<&str>,
+        blueprint_path: &Path,
         mainnet: bool,
     ) -> Result<ShelleyAddress, Error> {
         // Parse stake address
@@ -481,7 +489,7 @@ where
         };
 
         // Read blueprint
-        let blueprint = File::open(self.blueprint_path())
+        let blueprint = File::open(blueprint_path)
             .map_err(|_| blueprint::error::Error::InvalidOrMissingFile)?;
         let blueprint: Blueprint = serde_json::from_reader(BufReader::new(blueprint))?;
 
@@ -490,35 +498,41 @@ where
             |known_validators| Error::MoreThanOneValidatorFound { known_validators };
         let when_missing = |known_validators| Error::NoValidatorNotFound { known_validators };
 
-        blueprint.with_validator(title, when_too_many, when_missing, |validator| {
-            // Make sure we're not calculating the address for a minting validator
-            if validator.datum.is_none() {
-                return Err(blueprint::error::Error::UnexpectedMintingValidator.into());
-            }
+        blueprint.with_validator(
+            module_name,
+            validator_name,
+            when_too_many,
+            when_missing,
+            |validator| {
+                let n = validator.parameters.len();
 
-            let n = validator.parameters.len();
-
-            if n > 0 {
-                Err(blueprint::error::Error::ParameterizedValidator { n }.into())
-            } else {
-                let network = if mainnet {
-                    Network::Mainnet
+                if n > 0 {
+                    Err(blueprint::error::Error::ParameterizedValidator { n }.into())
                 } else {
-                    Network::Testnet
-                };
+                    let network = if mainnet {
+                        Network::Mainnet
+                    } else {
+                        Network::Testnet
+                    };
 
-                Ok(validator.program.inner().address(
-                    network,
-                    delegation_part.to_owned(),
-                    &self.config.plutus.into(),
-                ))
-            }
-        })
+                    Ok(validator.program.inner().address(
+                        network,
+                        delegation_part.to_owned(),
+                        &self.config.plutus.into(),
+                    ))
+                }
+            },
+        )
     }
 
-    pub fn policy(&self, title: Option<&String>) -> Result<PolicyId, Error> {
+    pub fn policy(
+        &self,
+        module_name: Option<&str>,
+        validator_name: Option<&str>,
+        blueprint_path: &Path,
+    ) -> Result<PolicyId, Error> {
         // Read blueprint
-        let blueprint = File::open(self.blueprint_path())
+        let blueprint = File::open(blueprint_path)
             .map_err(|_| blueprint::error::Error::InvalidOrMissingFile)?;
         let blueprint: Blueprint = serde_json::from_reader(BufReader::new(blueprint))?;
 
@@ -527,19 +541,20 @@ where
             |known_validators| Error::MoreThanOneValidatorFound { known_validators };
         let when_missing = |known_validators| Error::NoValidatorNotFound { known_validators };
 
-        blueprint.with_validator(title, when_too_many, when_missing, |validator| {
-            // Make sure we're not calculating the policy for a spending validator
-            if validator.datum.is_some() {
-                return Err(blueprint::error::Error::UnexpectedSpendingValidator.into());
-            }
-
-            let n = validator.parameters.len();
-            if n > 0 {
-                Err(blueprint::error::Error::ParameterizedValidator { n }.into())
-            } else {
-                Ok(validator.program.compiled_code_and_hash().1)
-            }
-        })
+        blueprint.with_validator(
+            module_name,
+            validator_name,
+            when_too_many,
+            when_missing,
+            |validator| {
+                let n = validator.parameters.len();
+                if n > 0 {
+                    Err(blueprint::error::Error::ParameterizedValidator { n }.into())
+                } else {
+                    Ok(validator.program.compiled_code_and_hash().1)
+                }
+            },
+        )
     }
 
     pub fn export(
@@ -584,7 +599,9 @@ where
 
     pub fn construct_parameter_incrementally<F>(
         &self,
-        title: Option<&String>,
+        module_name: Option<&str>,
+        validator_name: Option<&str>,
+        blueprint_path: &Path,
         ask: F,
     ) -> Result<PlutusData, Error>
     where
@@ -594,7 +611,7 @@ where
         ) -> Result<PlutusData, blueprint::error::Error>,
     {
         // Read blueprint
-        let blueprint = File::open(self.blueprint_path())
+        let blueprint = File::open(blueprint_path)
             .map_err(|_| blueprint::error::Error::InvalidOrMissingFile)?;
         let blueprint: Blueprint = serde_json::from_reader(BufReader::new(blueprint))?;
 
@@ -603,22 +620,30 @@ where
             |known_validators| Error::MoreThanOneValidatorFound { known_validators };
         let when_missing = |known_validators| Error::NoValidatorNotFound { known_validators };
 
-        let data = blueprint.with_validator(title, when_too_many, when_missing, |validator| {
-            validator
-                .ask_next_parameter(&blueprint.definitions, &ask)
-                .map_err(|e| e.into())
-        })?;
+        let data = blueprint.with_validator(
+            module_name,
+            validator_name,
+            when_too_many,
+            when_missing,
+            |validator| {
+                validator
+                    .ask_next_parameter(&blueprint.definitions, &ask)
+                    .map_err(|e| e.into())
+            },
+        )?;
 
         Ok(data)
     }
 
     pub fn apply_parameter(
         &self,
-        title: Option<&String>,
+        module_name: Option<&str>,
+        validator_name: Option<&str>,
+        blueprint_path: &Path,
         param: &PlutusData,
     ) -> Result<Blueprint, Error> {
         // Read blueprint
-        let blueprint = File::open(self.blueprint_path())
+        let blueprint = File::open(blueprint_path)
             .map_err(|_| blueprint::error::Error::InvalidOrMissingFile)?;
         let mut blueprint: Blueprint = serde_json::from_reader(BufReader::new(blueprint))?;
 
@@ -627,21 +652,28 @@ where
             |known_validators| Error::MoreThanOneValidatorFound { known_validators };
         let when_missing = |known_validators| Error::NoValidatorNotFound { known_validators };
 
-        let applied_validator =
-            blueprint.with_validator(title, when_too_many, when_missing, |validator| {
+        let applied_validator = blueprint.with_validator(
+            module_name,
+            validator_name,
+            when_too_many,
+            when_missing,
+            |validator| {
                 validator
+                    .clone()
                     .apply(&blueprint.definitions, param)
                     .map_err(|e| e.into())
-            })?;
+            },
+        )?;
+
+        let prefix = |v: &str| v.split('.').take(2).collect::<Vec<&str>>().join(".");
 
         // Overwrite validator
         blueprint.validators = blueprint
             .validators
             .into_iter()
             .map(|validator| {
-                let same_title = validator.title == applied_validator.title;
-                if same_title {
-                    applied_validator.to_owned()
+                if prefix(&applied_validator.title) == prefix(&validator.title) {
+                    applied_validator.clone()
                 } else {
                     validator
                 }

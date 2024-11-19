@@ -3276,3 +3276,172 @@ fn wrong_arity_on_known_builtin() {
         Err((_, Error::IncorrectFunctionCallArity { .. }))
     ))
 }
+
+#[test]
+fn softcasting_unused_let_binding() {
+    let source_code = r#"
+        pub fn is_int(data: Data) -> Bool {
+          if data is Int {
+            True
+          } else {
+            False
+          }
+        }
+    "#;
+
+    let result = dbg!(check(parse(source_code)));
+    assert!(result.is_ok());
+
+    let (warnings, _) = result.unwrap();
+    assert!(warnings.is_empty(), "should not contain any warnings");
+}
+
+#[test]
+fn dangling_trace_let_standalone() {
+    let source_code = r#"
+        test foo() {
+          trace @"foo"
+          let True = True
+        }
+    "#;
+
+    assert!(matches!(
+        check_validator(parse(source_code)),
+        Err((_, Error::LastExpressionIsAssignment { .. }))
+    ))
+}
+
+#[test]
+fn dangling_trace_let_in_sequence() {
+    let source_code = r#"
+        test foo() {
+          let predicate = True
+          trace @"foo"
+          let result = predicate
+        }
+    "#;
+
+    assert!(matches!(
+        check_validator(parse(source_code)),
+        Err((_, Error::LastExpressionIsAssignment { .. }))
+    ))
+}
+
+#[test]
+fn dangling_trace_let_in_trace() {
+    let source_code = r#"
+        test foo() {
+          trace @"foo"
+          trace @"bar"
+          let result = True
+        }
+    "#;
+
+    assert!(matches!(
+        check_validator(parse(source_code)),
+        Err((_, Error::LastExpressionIsAssignment { .. }))
+    ))
+}
+
+#[test]
+fn destructuring_validator_params_tuple() {
+    let source_code = r#"
+        validator foo((x, y): (Int, Int)) {
+            mint(_redeemer, _policy_id, _self) {
+              x + y > 42
+            }
+
+            else(_) {
+              fail
+            }
+        }
+    "#;
+
+    let result = check_validator(parse(source_code));
+    assert!(result.is_ok());
+
+    let (warnings, _) = result.unwrap();
+    assert!(
+        matches!(&warnings[..], &[]),
+        "should be empty: {warnings:#?}"
+    );
+}
+
+#[test]
+fn destructuring_validator_params_record() {
+    let source_code = r#"
+        pub type Foo {
+            Foo(Int, Int)
+        }
+
+        validator foo(Foo(x, y): Foo) {
+            mint(_redeemer, _policy_id, _self) {
+              x + y > 42
+            }
+
+            else(_) {
+              fail
+            }
+        }
+    "#;
+
+    let result = check_validator(parse(source_code));
+    assert!(result.is_ok());
+
+    let (warnings, _) = result.unwrap();
+    assert!(
+        matches!(&warnings[..], &[]),
+        "should be empty: {warnings:#?}"
+    );
+}
+
+#[test]
+fn constant_generic_lambda() {
+    let source_code = r#"const foo: fn(a) -> List<a> = fn(x: a) { [x] }"#;
+    assert!(matches!(
+        check(parse(source_code)),
+        Err((_, Error::GenericLeftAtBoundary { .. }))
+    ))
+}
+
+#[test]
+fn constant_generic_mismatch() {
+    let source_code = r#"const foo: List<a> = [42]"#;
+    assert!(matches!(
+        check(parse(source_code)),
+        Err((_, Error::CouldNotUnify { .. }))
+    ))
+}
+
+#[test]
+fn constant_generic_inferred_1() {
+    let source_code = r#"const foo = [42]"#;
+    assert!(check(parse(source_code)).is_ok());
+}
+
+#[test]
+fn constant_generic_inferred_2() {
+    let source_code = r#"
+        const foo = fn(x) { [x] }(42)
+
+        test my_test() {
+            foo == [42]
+        }
+    "#;
+    assert!(check(parse(source_code)).is_ok());
+}
+
+#[test]
+fn constant_generic_inferred_3() {
+    let source_code = r#"const foo: List<a> = fn(x) { [x] }(42)"#;
+    assert!(matches!(
+        check(parse(source_code)),
+        Err((_, Error::CouldNotUnify { .. }))
+    ))
+}
+
+#[test]
+fn constant_generic_empty() {
+    let source_code = r#"const foo: List<a> = []"#;
+    assert!(check_validator(parse(source_code)).is_ok());
+}

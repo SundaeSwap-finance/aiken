@@ -9,7 +9,7 @@ tag-name = "v{{version}}"
 # Config for 'cargo dist'
 [workspace.metadata.dist]
 # The preferred cargo-dist version to use in CI (Cargo.toml SemVer syntax)
-cargo-dist-version = "0.19.1"
+cargo-dist-version = "0.22.1"
 # CI backends to support
 ci = "github"
 # The installers to generate for each app
@@ -17,12 +17,7 @@ installers = ["shell", "powershell", "npm", "homebrew"]
 # A GitHub repo to push Homebrew formulas to
 tap = "aiken-lang/homebrew-tap"
 # Target platforms to build apps for (Rust target-triple syntax)
-targets = [
-    "aarch64-apple-darwin",
-    "x86_64-apple-darwin",
-    "x86_64-unknown-linux-gnu",
-    "x86_64-pc-windows-msvc",
-]
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-musl", "x86_64-pc-windows-msvc"]
 # The archive format to use for windows builds (defaults .zip)
 windows-archive = ".tar.gz"
 # The archive format to use for non-windows builds (defaults .tar.xz)
@@ -31,7 +26,7 @@ unix-archive = ".tar.gz"
 npm-scope = "@aiken-lang"
 # Publish jobs to run in CI
 publish-jobs = ["homebrew", "npm"]
-# Publish jobs to run in CI
+# Which actions to run on pull requests
 pr-run-mode = "plan"
 # Whether to install an updater program
 install-updater = false
@@ -39,21 +34,29 @@ install-updater = false
 install-path = "~/.aiken/bin"
 # Whether to publish prereleases to package managers
 publish-prereleases = true
+# Inject build steps into the build-local-artifacts job to prepare the container.
+# This is needed to install libssl-dev and musl tools for producing statically linked
+# binary on Linux and avoid weird segfaults.
+#
+# Note: should be a path relative to the .github/workflows/ directory, and
+# which should point to a .yml file containing the github workflow steps just
+# as one would normally write them in a workflow.
+github-build-setup = "../musl-build-setup.yml"
 
 # Cargo-dist uses ubuntu-20.04 by default, causing issues in various cases
 # because it links with openssl-1.1 whereas recent distro ships with 3.x
 [workspace.metadata.dist.github-custom-runners]
-x86_64-unknown-linux-gnu = "ubuntu-22.04"
+x86_64-unknown-linux-musl = "ubuntu-22.04"
 
 [workspace.dependencies]
 walkdir = "2.3.2"
 insta = { version = "1.30.0", features = ["yaml", "json", "redactions"] }
 miette = { version = "7.2.0" }
-pallas-addresses = "0.30.1"
-pallas-codec = { version = "0.30.1", features = ["num-bigint"] }
-pallas-crypto = "0.30.1"
-pallas-primitives = "0.30.1"
-pallas-traverse = "0.30.1"
+pallas-addresses = "0.31.0"
+pallas-codec = { version = "0.31.0", features = ["num-bigint"] }
+pallas-crypto = "0.31.0"
+pallas-primitives = "0.31.0"
+pallas-traverse = "0.31.0"
 
 [profile.dev.package.insta]
 opt-level = 3

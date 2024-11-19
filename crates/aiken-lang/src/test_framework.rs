@@ -9,12 +9,18 @@ use crate::{
 use cryptoxide::{blake2b::Blake2b, digest::Digest};
 use indexmap::IndexMap;
 use itertools::Itertools;
-use owo_colors::{OwoColorize, Stream};
+use owo_colors::{OwoColorize, Stream, Stream::Stderr};
 use pallas_primitives::alonzo::{Constr, PlutusData};
 use patricia_tree::PatriciaMap;
 use std::{
-    borrow::Borrow, collections::BTreeMap, convert::TryFrom, fmt::Debug, ops::Deref, path::PathBuf,
+    borrow::Borrow,
+    collections::BTreeMap,
+    convert::TryFrom,
+    fmt::{Debug, Display},
+    ops::Deref,
+    path::PathBuf,
     rc::Rc,
+    time::Duration,
 };
 use uplc::{
     ast::{Constant, Data, Name, NamedDeBruijn, Program, Term},
@@ -199,7 +205,7 @@ impl UnitTest {
 }
 
 /// ----- PropertyTest -----------------------------------------------------------------
-///
+
 #[derive(Debug, Clone)]
 pub struct PropertyTest {
     pub input_path: PathBuf,
@@ -229,6 +235,42 @@ pub struct Fuzzer<T> {
 pub struct FuzzerError {
     traces: Vec<String>,
     uplc_error: uplc::machine::Error,
+}
+
+#[derive(Debug, Clone)]
+pub enum Event {
+    Simplifying { choices: usize },
+    Simplified { duration: Duration, steps: usize },
+}
+
+impl Display for Event {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::result::Result<(), std::fmt::Error> {
+        match self {
+            Event::Simplifying { choices } => f.write_str(&format!(
+                "{} {}",
+                "  Simplifying"
+                    .if_supports_color(Stderr, |s| s.bold())
+                    .if_supports_color(Stderr, |s| s.purple()),
+                format!("counterexample from {choices} choices")
+                    .if_supports_color(Stderr, |s| s.bold()),
+            )),
+            Event::Simplified { duration, steps } => f.write_str(&format!(
+                "{} {}",
+                "   Simplified"
+                    .if_supports_color(Stderr, |s| s.bold())
+                    .if_supports_color(Stderr, |s| s.purple()),
+                format!(
+                    "counterexample in {} after {steps} steps",
+                    if duration.as_secs() == 0 {
+                        format!("{}ms", duration.as_millis())
+                    } else {
+                        format!("{}s", duration.as_secs())
+                    }
+                )
+                .if_supports_color(Stderr, |s| s.bold()),
+            )),
+        }
+    }
 }
 
 impl PropertyTest {
@@ -517,16 +559,15 @@ impl Prng {
                     {
                         return Prng::Seeded {
                             choices: choices.to_vec(),
-                            uplc: PlutusData::Constr(Constr {
-                                tag: 121 + Prng::SEEDED,
-                                fields: vec![
+                            uplc: Data::constr(
+                                Prng::SEEDED,
+                                vec![
                                     PlutusData::BoundedBytes(bytes.to_owned()),
                                     // Clear choices between seeded runs, to not
                                     // accumulate ALL choices ever made.
                                     PlutusData::BoundedBytes(vec![].into()),
                                 ],
-                                any_constructor: None,
-                            }),
+                            ),
                         };
                     }
                 }
@@ -626,6 +667,16 @@ impl<'a> Counterexample<'a> {
     pub fn simplify(&mut self) {
         let mut prev;
 
+        let mut steps = 0;
+        let now = std::time::Instant::now();
+
+        eprintln!(
+            "{}",
+            Event::Simplifying {
+                choices: self.choices.len(),
+            }
+        );
+
         loop {
             prev = self.choices.clone();
 
@@ -644,6 +695,7 @@ impl<'a> Counterexample<'a> {
                 while !underflow {
                     if i >= self.choices.len() {
                         (i, underflow) = i.overflowing_sub(1);
+                        steps += 1;
                         continue;
                     }
 
@@ -674,6 +726,8 @@ impl<'a> Counterexample<'a> {
 
                         (i, underflow) = i.overflowing_sub(1);
                     }
+
+                    steps += 1;
                 }
 
                 k /= 2
@@ -687,6 +741,7 @@ impl<'a> Counterexample<'a> {
                 while k > 1 {
                     let mut i = self.choices.len();
                     while i >= k {
+                        steps += 1;
                         let ivs = (i - k..i).map(|j| (j, 0)).collect::<Vec<_>>();
                         i -= if self.replace(ivs) { k } else { 1 }
                     }
@@ -698,6 +753,7 @@ impl<'a> Counterexample<'a> {
                 // smaller number than doing multiple subtractions would.
                 let (mut i, mut underflow) = (self.choices.len() - 1, false);
                 while !underflow {
+                    steps += 1;
                     self.binary_search_replace(0, self.choices[i], |v| vec![(i, v)]);
                     (i, underflow) = i.overflowing_sub(1);
                 }
@@ -707,6 +763,7 @@ impl<'a> Counterexample<'a> {
                 while k > 1 {
                     let mut i = self.choices.len() - 1;
                     while i >= k {
+                        steps += 1;
                         let (from, to) = (i - k, i);
                         self.replace(
                             (from..to)
@@ -740,6 +797,8 @@ impl<'a> Counterexample<'a> {
                             self.binary_search_replace(0, iv, |v| vec![(i, v), (j, jv + (iv - v))]);
                         }
 
+                        steps += 1;
+
                         j -= 1
                     }
                 }
@@ -751,6 +810,14 @@ impl<'a> Counterexample<'a> {
                 break;
             }
         }
+
+        eprintln!(
+            "{}",
+            Event::Simplified {
+                duration: now.elapsed(),
+                steps,
+            }
+        );
     }
 
     /// Try to replace a value with a smaller value by doing a binary search between
@@ -1011,7 +1078,7 @@ impl PropertyTestResult<PlutusData> {
             counterexample: self.counterexample.map(|ok| {
                 ok.map(|counterexample| {
                     UntypedExpr::reify_data(data_types, counterexample, &self.test.fuzzer.type_info)
-                        .expect("Failed to reify counterexample?")
+                        .expect("failed to reify counterexample?")
                 })
             }),
             iterations: self.iterations,
@@ -1133,28 +1200,50 @@ impl TryFrom<TypedExpr> for Assertion<TypedExpr> {
     }
 }
 
+pub struct AssertionStyleOptions<'a> {
+    red: Box<dyn Fn(String) -> String + 'a>,
+    bold: Box<dyn Fn(String) -> String + 'a>,
+}
+
+impl<'a> AssertionStyleOptions<'a> {
+    pub fn new(stream: Option<&'a Stream>) -> Self {
+        match stream {
+            Some(stream) => Self {
+                red: Box::new(|s| {
+                    s.if_supports_color(stream.to_owned(), |s| s.red())
+                        .to_string()
+                }),
+                bold: Box::new(|s| {
+                    s.if_supports_color(stream.to_owned(), |s| s.bold())
+                        .to_string()
+                }),
+            },
+            None => Self {
+                red: Box::new(|s| s),
+                bold: Box::new(|s| s),
+            },
+        }
+    }
+}
+
 impl Assertion<UntypedExpr> {
     #[allow(clippy::just_underscores_and_digits)]
-    pub fn to_string(&self, stream: Stream, expect_failure: bool) -> String {
-        let red = |s: &str| {
-            format!("× {s}")
-                .if_supports_color(stream, |s| s.red())
-                .if_supports_color(stream, |s| s.bold())
-                .to_string()
-        };
+    pub fn to_string(&self, expect_failure: bool, style: &AssertionStyleOptions) -> String {
+        let red = |s: &str| style.red.as_ref()(s.to_string());
+        let x = |s: &str| style.red.as_ref()(style.bold.as_ref()(format!("× {s}")));
 
         // head did not map to a constant
         if self.head.is_err() {
-            return red("program failed");
+            return x("program failed");
         }
 
         // any value in tail did not map to a constant
         if self.tail.is_err() {
-            return red("program failed");
+            return x("program failed");
         }
 
-        fn fmt_side(side: &UntypedExpr, stream: Stream) -> String {
-            let __ = "│".if_supports_color(stream, |s| s.red());
+        fn fmt_side(side: &UntypedExpr, red: &dyn Fn(&str) -> String) -> String {
+            let __ = red("│");
 
             Formatter::new()
                 .expr(side, false)
@@ -1165,20 +1254,17 @@ impl Assertion<UntypedExpr> {
                 .join("\n")
         }
 
-        let left = fmt_side(self.head.as_ref().unwrap(), stream);
+        let left = fmt_side(self.head.as_ref().unwrap(), &red);
 
         let tail = self.tail.as_ref().unwrap();
 
-        let right = fmt_side(tail.first(), stream);
+        let right = fmt_side(tail.first(), &red);
 
         format!(
             "{}{}{}",
-            red("expected"),
+            x("expected"),
             if expect_failure && self.bin_op == BinOp::Or {
-                " neither\n"
-                    .if_supports_color(stream, |s| s.red())
-                    .if_supports_color(stream, |s| s.bold())
-                    .to_string()
+                x(" neither\n")
             } else {
                 "\n".to_string()
             },
@@ -1186,34 +1272,34 @@ impl Assertion<UntypedExpr> {
                 match self.bin_op {
                     BinOp::And => [
                         left,
-                        red("and"),
+                        x("and"),
                         [
-                            tail.mapped_ref(|s| fmt_side(s, stream))
-                                .join(format!("\n{}\n", red("and")).as_str()),
+                            tail.mapped_ref(|s| fmt_side(s, &red))
+                                .join(format!("\n{}\n", x("and")).as_str()),
                             if tail.len() > 1 {
-                                red("to not all be true")
+                                x("to not all be true")
                             } else {
-                                red("to not both be true")
+                                x("to not both be true")
                             },
                         ]
                         .join("\n"),
                     ],
                     BinOp::Or => [
                         left,
-                        red("nor"),
+                        x("nor"),
                         [
-                            tail.mapped_ref(|s| fmt_side(s, stream))
-                                .join(format!("\n{}\n", red("nor")).as_str()),
-                            red("to be true"),
+                            tail.mapped_ref(|s| fmt_side(s, &red))
+                                .join(format!("\n{}\n", x("nor")).as_str()),
+                            x("to be true"),
                         ]
                         .join("\n"),
                     ],
-                    BinOp::Eq => [left, red("to not equal"), right],
-                    BinOp::NotEq => [left, red("to not be different"), right],
-                    BinOp::LtInt => [left, red("to not be lower than"), right],
-                    BinOp::LtEqInt => [left, red("to not be lower than or equal to"), right],
-                    BinOp::GtInt => [left, red("to not be greater than"), right],
-                    BinOp::GtEqInt => [left, red("to not be greater than or equal to"), right],
+                    BinOp::Eq => [left, x("to not equal"), right],
+                    BinOp::NotEq => [left, x("to not be different"), right],
+                    BinOp::LtInt => [left, x("to not be lower than"), right],
+                    BinOp::LtEqInt => [left, x("to not be lower than or equal to"), right],
+                    BinOp::GtInt => [left, x("to not be greater than"), right],
+                    BinOp::GtEqInt => [left, x("to not be greater than or equal to"), right],
                     _ => unreachable!("unexpected non-boolean binary operator in assertion?"),
                 }
                 .join("\n")
@@ -1221,34 +1307,34 @@ impl Assertion<UntypedExpr> {
                 match self.bin_op {
                     BinOp::And => [
                         left,
-                        red("and"),
+                        x("and"),
                         [
-                            tail.mapped_ref(|s| fmt_side(s, stream))
-                                .join(format!("\n{}\n", red("and")).as_str()),
+                            tail.mapped_ref(|s| fmt_side(s, &red))
+                                .join(format!("\n{}\n", x("and")).as_str()),
                             if tail.len() > 1 {
-                                red("to all be true")
+                                x("to all be true")
                             } else {
-                                red("to both be true")
+                                x("to both be true")
                             },
                         ]
                         .join("\n"),
                     ],
                     BinOp::Or => [
                         left,
-                        red("or"),
+                        x("or"),
                         [
-                            tail.mapped_ref(|s| fmt_side(s, stream))
-                                .join(format!("\n{}\n", red("or")).as_str()),
-                            red("to be true"),
+                            tail.mapped_ref(|s| fmt_side(s, &red))
+                                .join(format!("\n{}\n", x("or")).as_str()),
+                            x("to be true"),
                         ]
                         .join("\n"),
                     ],
-                    BinOp::Eq => [left, red("to equal"), right],
-                    BinOp::NotEq => [left, red("to not equal"), right],
-                    BinOp::LtInt => [left, red("to be lower than"), right],
-                    BinOp::LtEqInt => [left, red("to be lower than or equal to"), right],
-                    BinOp::GtInt => [left, red("to be greater than"), right],
-                    BinOp::GtEqInt => [left, red("to be greater than or equal to"), right],
+                    BinOp::Eq => [left, x("to equal"), right],
+                    BinOp::NotEq => [left, x("to not equal"), right],
+                    BinOp::LtInt => [left, x("to be lower than"), right],
+                    BinOp::LtEqInt => [left, x("to be lower than or equal to"), right],
+                    BinOp::GtInt => [left, x("to be greater than"), right],
+                    BinOp::GtEqInt => [left, x("to be greater than or equal to"), right],
                     _ => unreachable!("unexpected non-boolean binary operator in assertion?"),
                 }
                 .join("\n")

@@ -1,14 +1,32 @@
-use super::build::{filter_traces_parser, trace_level_parser};
+use super::build::{trace_filter_parser, trace_level_parser};
 use aiken_lang::{
     ast::{TraceLevel, Tracing},
     test_framework::PropertyTest,
 };
-use aiken_project::watch::{self, watch_project, with_project};
+use aiken_project::{
+    telemetry::json_schema,
+    watch::{self, watch_project, with_project},
+};
 use rand::prelude::*;
-use std::{path::PathBuf, process};
+use std::{
+    io::{self, IsTerminal},
+    path::PathBuf,
+    process,
+};
 
 #[derive(clap::Args)]
-/// Type-check an Aiken project
+#[command(
+    verbatim_doc_comment,
+    about = color_print::cstr!(r#"
+Type-check an Aiken project and run any tests found.
+
+Test results are printed as stylized outputs when `stdout` is a TTY-capable terminal. If it
+isn't, (e.g. because you are redirecting the output to a file), test results are printed as
+a JSON structured object. Use `--show-json-schema` to see the whole schema.
+"#),
+    after_long_help = color_print::cstr!(r#"You are seeing the extended help. Use `-h` instead of `--help` for a more compact view.
+"#
+))]
 pub struct Args {
     /// Path to project
     directory: Option<PathBuf>,
@@ -25,22 +43,27 @@ pub struct Args {
     #[clap(long)]
     debug: bool,
 
+    /// When enabled, print-out the JSON-schema of the command output when the target isn't an
+    /// ANSI-capable terminal
+    #[clap(long, required = false)]
+    show_json_schema: bool,
+
     /// When enabled, re-run the command on file changes instead of exiting
     #[clap(long)]
     watch: bool,
 
     /// An initial seed to initialize the pseudo-random generator for property-tests.
-    #[clap(long)]
+    #[clap(long, value_name = "UINT")]
     seed: Option<u32>,
 
     /// Maximum number of successful test run for considering a property-based test valid.
-    #[clap(long, default_value_t = PropertyTest::DEFAULT_MAX_SUCCESS)]
+    #[clap(long, default_value_t = PropertyTest::DEFAULT_MAX_SUCCESS, value_name="UINT")]
     max_success: usize,
 
     /// Only run tests if they match any of these strings.
     /// You can match a module with `-m aiken/list` or `-m list`.
     /// You can match a test with `-m "aiken/list.{map}"` or `-m "aiken/option.{flatten_1}"`
-    #[clap(short, long)]
+    #[clap(short, long, verbatim_doc_comment)]
     match_tests: Option<Vec<String>>,
 
     /// This is meant to be used with `--match-tests`.
@@ -66,20 +89,15 @@ pub struct Args {
     ///   - all:
     ///       include both user-defined and compiler-generated traces.
     ///
-    /// [optional] [default: all]
-    #[clap(short, long, value_parser=filter_traces_parser(), default_missing_value="all", verbatim_doc_comment)]
-    filter_traces: Option<fn(TraceLevel) -> Tracing>,
+    /// [default: all]
+    #[clap(short = 'f', long, value_parser=trace_filter_parser(), default_missing_value="all", verbatim_doc_comment, alias="filter_traces")]
+    trace_filter: Option<fn(TraceLevel) -> Tracing>,
 
     /// Choose the verbosity level of traces:
     ///
-    ///   - silent:
-    ///       disable traces altogether
-    ///
-    ///   - compact:
-    ///       only culprit line numbers are shown on failures
-    ///
-    ///   - verbose:
-    ///       enable full verbose traces as provided by the user or the compiler
+    ///   - silent: disable traces altogether
+    ///   - compact: only culprit line numbers are shown on failures
+    ///   - verbose: enable full verbose traces as provided by the user or the compiler
     ///
     /// [optional]
     #[clap(short, long, value_parser=trace_level_parser(), default_value_t=TraceLevel::Verbose, verbatim_doc_comment)]
@@ -92,16 +110,22 @@ pub fn exec(
         deny,
         skip_tests,
         debug,
+        show_json_schema,
         match_tests,
         exact_match,
         watch,
-        filter_traces,
+        trace_filter,
         trace_level,
         seed,
         max_success,
         env,
     }: Args,
 ) -> miette::Result<()> {
+    if show_json_schema {
+        println!("{}", serde_json::to_string_pretty(&json_schema()).unwrap());
+        std::process::exit(0);
+    }
+
     let mut rng = rand::thread_rng();
 
     let seed = seed.unwrap_or_else(|| rng.gen());
@@ -115,29 +139,34 @@ pub fn exec(
                 exact_match,
                 seed,
                 max_success,
-                match filter_traces {
-                    Some(filter_traces) => filter_traces(trace_level),
+                match trace_filter {
+                    Some(trace_filter) => trace_filter(trace_level),
                     None => Tracing::All(trace_level),
                 },
                 env.clone(),
             )
         })
     } else {
-        with_project(directory.as_deref(), deny, |p| {
-            p.check(
-                skip_tests,
-                match_tests.clone(),
-                debug,
-                exact_match,
-                seed,
-                max_success,
-                match filter_traces {
-                    Some(filter_traces) => filter_traces(trace_level),
-                    None => Tracing::All(trace_level),
-                },
-                env.clone(),
-            )
-        })
+        with_project(
+            directory.as_deref(),
+            deny,
+            !io::stdout().is_terminal(),
+            |p| {
+                p.check(
+                    skip_tests,
+                    match_tests.clone(),
+                    debug,
+                    exact_match,
+                    seed,
+                    max_success,
+                    match trace_filter {
+                        Some(trace_filter) => trace_filter(trace_level),
+                        None => Tracing::All(trace_level),
+                    },
+                    env.clone(),
+                )
+            },
+        )
     };
 
     result.map_err(|_| process::exit(1))

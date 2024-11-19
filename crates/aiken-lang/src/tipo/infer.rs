@@ -7,10 +7,10 @@ use super::{
 };
 use crate::{
     ast::{
-        Annotation, ArgName, ArgVia, DataType, Definition, Function, ModuleConstant, ModuleKind,
-        RecordConstructor, RecordConstructorArg, Tracing, TypeAlias, TypedArg, TypedDefinition,
-        TypedModule, TypedValidator, UntypedArg, UntypedDefinition, UntypedModule, UntypedPattern,
-        UntypedValidator, Use, Validator,
+        Annotation, ArgBy, ArgName, ArgVia, DataType, Definition, Function, ModuleConstant,
+        ModuleKind, RecordConstructor, RecordConstructorArg, Tracing, TypeAlias, TypedArg,
+        TypedDefinition, TypedModule, TypedValidator, UntypedArg, UntypedDefinition, UntypedModule,
+        UntypedPattern, UntypedValidator, Use, Validator,
     },
     expr::{TypedExpr, UntypedAssignmentKind},
     tipo::{expr::infer_function, Span, Type, TypeVar},
@@ -20,6 +20,7 @@ use std::{borrow::Borrow, collections::HashMap, ops::Deref, rc::Rc};
 
 impl UntypedModule {
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::result_large_err)]
     pub fn infer(
         mut self,
         id_gen: &IdGenerator,
@@ -100,6 +101,12 @@ impl UntypedModule {
             .collect();
 
         // Generate warnings for unused items
+        environment.warnings.retain(|warning| match warning {
+            Warning::UnusedVariable { location, name } => !environment
+                .validator_params
+                .contains(&(name.to_string(), *location)),
+            _ => true,
+        });
         environment.convert_unused_to_warnings();
 
         // Remove private and imported types and values to create the public interface
@@ -152,6 +159,7 @@ impl UntypedModule {
     }
 }
 
+#[allow(clippy::result_large_err)]
 fn infer_definition(
     def: UntypedDefinition,
     module_name: &String,
@@ -647,6 +655,10 @@ fn infer_definition(
 
             let tipo = typed_expr.tipo();
 
+            if tipo.is_function() && !tipo.is_monomorphic() {
+                return Err(Error::GenericLeftAtBoundary { location });
+            }
+
             let variant = ValueConstructor {
                 public,
                 variant: ValueConstructorVariant::ModuleConstant {
@@ -677,6 +689,7 @@ fn infer_definition(
     }
 }
 
+#[allow(clippy::result_large_err)]
 fn infer_fuzzer(
     environment: &mut Environment<'_>,
     expected_inner_type: Option<Rc<Type>>,
@@ -753,6 +766,7 @@ fn infer_fuzzer(
     }
 }
 
+#[allow(clippy::result_large_err)]
 fn annotate_fuzzer(tipo: &Type, location: &Span) -> Result<Annotation, Error> {
     match tipo {
         Type::App {
@@ -812,7 +826,11 @@ fn annotate_fuzzer(tipo: &Type, location: &Span) -> Result<Annotation, Error> {
     }
 }
 
-fn put_params_in_scope(name: &str, environment: &mut Environment, params: &[UntypedArg]) {
+fn put_params_in_scope<'a>(
+    name: &'_ str,
+    environment: &'a mut Environment,
+    params: &'a [UntypedArg],
+) {
     let preregistered_fn = environment
         .get_variable(name)
         .expect("Could not find preregistered type for function");
@@ -828,7 +846,7 @@ fn put_params_in_scope(name: &str, environment: &mut Environment, params: &[Unty
         .zip(args_types[0..params.len()].iter())
         .enumerate()
     {
-        match &arg.arg_name(ix) {
+        match arg.arg_name(ix) {
             ArgName::Named {
                 name,
                 label: _,
@@ -842,7 +860,13 @@ fn put_params_in_scope(name: &str, environment: &mut Environment, params: &[Unty
                     t.clone(),
                 );
 
-                environment.init_usage(name.to_string(), EntityKind::Variable, arg.location);
+                if let ArgBy::ByPattern(ref pattern) = arg.by {
+                    pattern.collect_identifiers(&mut |identifier| {
+                        environment.validator_params.insert(identifier);
+                    })
+                }
+
+                environment.init_usage(name, EntityKind::Variable, arg.location);
             }
             ArgName::Named { .. } | ArgName::Discarded { .. } => (),
         };

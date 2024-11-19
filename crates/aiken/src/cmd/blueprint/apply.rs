@@ -24,11 +24,25 @@ pub struct Args {
     /// For example, `182A` designates an integer of value 42. If you're unsure about the shape of
     /// the parameter, look at the schema specified in the project's blueprint (i.e.
     /// `plutus.json`), or use the `cbor.serialise` function from the Aiken standard library.
+    #[clap(value_name = "CBOR")]
     parameter: Option<String>,
 
-    /// Output file. Optional, print on stdout when omitted.
-    #[clap(short, long)]
-    out: Option<PathBuf>,
+    /// Optional path to the blueprint file to be used as input.
+    ///
+    /// [default: plutus.json]
+    #[clap(
+        short,
+        long = "in",
+        value_parser,
+        value_name = "FILEPATH",
+        verbatim_doc_comment
+    )]
+    input: Option<PathBuf>,
+
+    /// Optional relative filepath to the generated Plutus blueprint. Default to printing to stdout
+    /// when omitted.
+    #[clap(short, long("out"), value_parser, value_name = "FILEPATH")]
+    output: Option<PathBuf>,
 
     /// Name of the validator's module within the project. Optional if there's only one validator.
     #[clap(short, long)]
@@ -42,30 +56,21 @@ pub struct Args {
 pub fn exec(
     Args {
         parameter,
-        out,
+        input,
+        output,
         module,
         validator,
     }: Args,
 ) -> miette::Result<()> {
-    with_project(None, false, |p| {
-        let title = module.as_ref().map(|m| {
-            format!(
-                "{m}{}",
-                validator
-                    .as_ref()
-                    .map(|v| format!(".{v}"))
-                    .unwrap_or_default()
-            )
-        });
-
-        let title = title.as_ref().or(validator.as_ref());
-
+    with_project(None, false, false, |p| {
         eprintln!(
             "{} blueprint",
             "    Analyzing"
                 .if_supports_color(Stderr, |s| s.purple())
                 .if_supports_color(Stderr, |s| s.bold()),
         );
+
+        let blueprint_input_path = p.blueprint_path(input.as_deref());
 
         let data: PlutusData = match &parameter {
             Some(param) => {
@@ -103,7 +108,12 @@ pub fn exec(
                     })
             }
 
-            None => p.construct_parameter_incrementally(title, ask_schema)?,
+            None => p.construct_parameter_incrementally(
+                module.as_deref(),
+                validator.as_deref(),
+                &blueprint_input_path,
+                ask_schema,
+            )?,
         };
 
         eprintln!(
@@ -117,19 +127,27 @@ pub fn exec(
             }
         );
 
-        let blueprint = p.apply_parameter(title, &data)?;
+        let blueprint = p.apply_parameter(
+            module.as_deref(),
+            validator.as_deref(),
+            &blueprint_input_path,
+            &data,
+        )?;
 
         let json = serde_json::to_string_pretty(&blueprint).unwrap();
 
-        match out {
+        match output {
             None => {
                 println!("\n{}\n", json);
                 Ok(())
             }
-            Some(ref path) => fs::write(path, json).map_err(|error| Error::FileIo {
-                error,
-                path: p.blueprint_path(),
-            }),
+            Some(ref path) => {
+                let blueprint_output_path = p.blueprint_path(Some(path));
+                fs::write(&blueprint_output_path, json).map_err(|error| Error::FileIo {
+                    error,
+                    path: blueprint_output_path,
+                })
+            }
         }?;
 
         eprintln!(

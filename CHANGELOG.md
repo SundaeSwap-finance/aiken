@@ -1,6 +1,71 @@
 # Changelog
 
-## v1.1.3 - UNRELEASED
+## v1.1.7 - 2024-11-19
+
+### Changed
+
+- **aiken**: Move JSON schema help for `check` under a new dedicated flag `--show-json-schema`. @KtorZ
+- **aiken-lang**: Fix pattern-matching on list wildcard sometimes causing compiler crash following the new _decision trees_ approach. @MicroProofs
+- **uplc**, **aiken**, **aiken-lang**: Update internal dependencies to pallas-0.31.0. @KtorZ
+
+## v1.1.6 - 2024-11-13
+
+### Added
+
+- **aiken**: Optionally provide blueprint file location when using `blueprint apply`. @Riley-Kilgore
+- **aiken**: Output test results as structured JSON when the target output is not a TTY terminal. @Riley-Kilgore, @KtorZ
+
+### Changed
+
+- **aiken**: Fix validator selection for `apply`, `address` and `policy` commands. Parameters are also now correctly applied to all handlers of a given validator, instead of needing to be manually targetted one-by-one. @KtorZ
+- **aiken**: Add more flexibility around the management of Plutus blueprint files for `build`, `address`, `policy` and `apply` commands. See [#1055](https://github.com/aiken-lang/aiken/issues/1055). @KtorZ
+- **aiken**: Rename `--filter_traces` to `--trace_filter` for more consistency with `--trace_level`. An alias for `--filter_traces` still exists for backward compatibility. @KtorZ
+- **aiken-project**: Fix `aiken docs` wrongly formatting list constants as tuples. See [#1048](https://github.com/aiken-lang/aiken/issues/1048). @KtorZ
+- **aiken-project**: Fix `aiken docs` source linking crashing when generating docs for config modules. See [#1044](https://github.com/aiken-lang/aiken/issues/1044). @KtorZ
+- **aiken-project**: Fix `aiken docs` generating very long lines for constants. @KtorZ
+- **aiken-lang**: Leverage [Decision Trees](https://www.cs.tufts.edu/comp/150FP/archive/luc-maranget/jun08.pdf) for compiling pattern matches to UPLC. @MicroProofs
+- **aiken-lang**: Rework optimization passes to safely reduce different kinds of patterns for each pass over the uplc. @MicroProofs
+- **aiken-lang**: Implement a looping mechanism to reduce uplc with deletion optimizations until term count remains the same. @MicroProofs
+
+### Removed
+
+- N/A
+
+## v1.1.5 - 2024-10-19
+
+### Added
+
+- N/A
+
+### Changed
+
+- **uplc**: Fix costing of byteStringToInteger builtins. @Microproofs
+- **aiken-lang**: Fix data-type reification from `Void`; somehow missing from known definition :facepalm:. @KtorZ
+
+### Removed
+
+- N/A
+
+## v1.1.4 - 2024-10-01
+
+### Added
+
+- N/A
+
+### Changed
+
+- **aiken-project**: Generate empty redeemer for `else` handler, to keep full compliance with the blueprint spec. @KtorZ
+- **aiken-lang**: Forbid constants evaluating to generic or unbound functions. Same restrictions as for validators or any exported UPLC programs apply here. @KtorZ & @MicroProofs
+- **aiken-lang**: Fix compiler crash on trace + expect as last expression of a clause. See #1029. @KtorZ
+- **aiken-lang**: Fix redundant warning on introduced identifiers when destructuring validator params. @KtorZ
+- **aiken-lsp**: Compile project using verbose tracing, to avoid having the language server complain about unused imports. @KtorZ
+- **uplc**: Fix (again :grimacing:) cost-models for PlutusV1 & PlutusV2. @MicroProofs
+
+### Removed
+
+- N/A
+
+## v1.1.3 - 2024-09-20
 
 ### Added
 
@@ -9,8 +74,14 @@
 ### Changed
 
 - **aiken-project**: Fix documentation link-tree generation messing up with modules when re-inserting the same module. @KtorZ
+- **aiken-project**: Provide intermediate feedback when looking for counterexamples during property tests. @KtorZ
 - **aiken-lang**: Fix formatter adding extra unnecessary newlines after literal lists clause values or assignments. @KtorZ
-- **aiken0lang**: Fix formatting of long multi-line if/is expressions. @KtorZ
+- **aiken-lang**: Fix formatting of long multi-line if/is expressions. @KtorZ
+- **aiken-lang**: Fix extraneous white-space added by the formatter after multiline alternative patterns. @KtorZ
+- **aiken-lang**: Fix incorrect warning about unused variable when softcasting without explicit right-pattern. @KtorZ
+- **aiken-lang**: Fix soft cast and hard cast on same type issues that lead to validator errors. @Microproofs
+- **aiken-lang**: Bls constants are automatically converted to a hoisted compressed form with uncompress builtin call. @Microproofs
+- **uplc**: Fix cost-models for PlutusV1 & PlutusV2. @MicroProofs
 
 ### Removed
 
