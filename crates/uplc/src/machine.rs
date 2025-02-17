@@ -45,12 +45,41 @@ pub enum Context {
     NoFrame,
 }
 
+#[derive(Debug, Clone)]
+pub enum Trace {
+    Log(String),
+    Label(String),
+}
+
+impl Trace {
+    pub fn to_string(&self) -> String {
+        match self {
+            Trace::Log(log) => log.clone(),
+            Trace::Label(label) => label.clone(),
+        }
+    }
+
+    pub fn unwrap_log(self) -> Option<String> {
+        match self {
+            Trace::Log(log) => Some(log),
+            _ => None,
+        }
+    }
+
+    pub fn unwrap_label(self) -> Option<String> {
+        match self {
+            Trace::Label(label) => Some(label),
+            _ => None,
+        }
+    }
+}
+
 pub struct Machine {
     costs: CostModel,
     pub ex_budget: ExBudget,
     slippage: u32,
     unbudgeted_steps: [u32; 10],
-    pub logs: Vec<String>,
+    pub traces: Vec<Trace>,
     version: Language,
 }
 
@@ -66,7 +95,7 @@ impl Machine {
             ex_budget: initial_budget,
             slippage,
             unbudgeted_steps: [0; 10],
-            logs: vec![],
+            traces: vec![],
             version,
         }
     }
@@ -352,7 +381,7 @@ impl Machine {
 
         self.spend_budget(cost)?;
 
-        runtime.call(&self.version, &mut self.logs)
+        runtime.call(&self.version, &mut self.traces)
     }
 
     fn lookup_var(&mut self, name: &NamedDeBruijn, env: &[Value]) -> Result<Value, Error> {

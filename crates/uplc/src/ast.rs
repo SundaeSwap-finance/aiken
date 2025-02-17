@@ -852,7 +852,7 @@ impl Program<NamedDeBruijn> {
 
         let term = machine.run(self.term);
 
-        EvalResult::new(term, machine.ex_budget, initial_budget, machine.logs)
+        EvalResult::new(term, machine.ex_budget, initial_budget, machine.traces)
     }
 
     /// Evaluate a Program as a specific PlutusVersion
@@ -861,7 +861,7 @@ impl Program<NamedDeBruijn> {
 
         let term = machine.run(self.term);
 
-        EvalResult::new(term, machine.ex_budget, initial_budget, machine.logs)
+        EvalResult::new(term, machine.ex_budget, initial_budget, machine.traces)
     }
 
     pub fn eval_as(
@@ -881,7 +881,7 @@ impl Program<NamedDeBruijn> {
 
         let term = machine.run(self.term);
 
-        EvalResult::new(term, machine.ex_budget, budget, machine.logs)
+        EvalResult::new(term, machine.ex_budget, budget, machine.traces)
     }
 }
 

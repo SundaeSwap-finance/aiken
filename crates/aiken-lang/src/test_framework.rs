@@ -24,7 +24,7 @@ use std::{
 };
 use uplc::{
     ast::{Constant, Data, Name, NamedDeBruijn, Program, Term},
-    machine::{cost_model::ExBudget, eval_result::EvalResult},
+    machine::{Trace, cost_model::ExBudget, eval_result::EvalResult},
 };
 use vec1::{vec1, Vec1};
 
@@ -233,7 +233,7 @@ pub struct Fuzzer<T> {
 #[derive(Debug, Clone, thiserror::Error, miette::Diagnostic)]
 #[error("Fuzzer exited unexpectedly: {uplc_error}")]
 pub struct FuzzerError {
-    traces: Vec<String>,
+    traces: Vec<Trace>,
     uplc_error: uplc::machine::Error,
 }
 
@@ -296,18 +296,12 @@ impl PropertyTest {
             Ok(None) => (Vec::new(), Ok(None), n),
             Ok(Some(counterexample)) => (
                 self.eval(&counterexample.value, plutus_version)
-                    .logs()
-                    .into_iter()
-                    .filter(|s| PropertyTest::extract_label(s).is_none())
-                    .collect(),
+                    .logs(),
                 Ok(Some(counterexample.value)),
                 n - remaining,
             ),
             Err(FuzzerError { traces, uplc_error }) => (
-                traces
-                    .into_iter()
-                    .filter(|s| PropertyTest::extract_label(s).is_none())
-                    .collect(),
+                traces.into_iter().filter_map(|t| t.unwrap_log()).collect(),
                 Err(uplc_error),
                 n - remaining + 1,
             ),
@@ -354,16 +348,14 @@ impl PropertyTest {
 
         let mut result = self.eval(&value, plutus_version);
 
-        for s in result.logs() {
+        for label in result.labels() {
             // NOTE: There may be other log outputs that interefere with labels. So *by
             // convention*, we treat as label strings that starts with a NUL byte, which
             // should be a guard sufficient to prevent inadvertent clashes.
-            if let Some(label) = PropertyTest::extract_label(&s) {
-                labels
-                    .entry(label)
-                    .and_modify(|count| *count += 1)
-                    .or_insert(1);
-            }
+            labels
+                .entry(label)
+                .and_modify(|count| *count += 1)
+                .or_insert(1);
         }
 
         let is_failure = result.failed(false);
@@ -426,14 +418,6 @@ impl PropertyTest {
         Program::<NamedDeBruijn>::try_from(program)
             .unwrap()
             .eval_version(ExBudget::max(), &plutus_version.into())
-    }
-
-    fn extract_label(s: &str) -> Option<String> {
-        if s.starts_with('\0') {
-            Some(s.split_at(1).1.to_string())
-        } else {
-            None
-        }
     }
 }
 
@@ -533,7 +517,7 @@ impl Prng {
         result
             .result()
             .map_err(|uplc_error| FuzzerError {
-                traces: result.logs(),
+                traces: result.traces(),
                 uplc_error,
             })
             .map(Prng::from_result)
