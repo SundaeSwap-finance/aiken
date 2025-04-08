@@ -51,6 +51,7 @@ impl Printer {
             alias,
             parameters,
             annotation,
+            module: _,
         }) = typ.alias().as_deref()
         {
             if let Some(resolved_parameters) = resolve_alias(parameters, annotation, typ) {
@@ -135,7 +136,7 @@ impl Printer {
 
     fn type_var_doc<'a>(&mut self, typ: &TypeVar) -> Document<'a> {
         match typ {
-            TypeVar::Link { tipo: ref typ, .. } => self.print(typ),
+            TypeVar::Link { tipo: typ, .. } => self.print(typ),
             TypeVar::Generic { id, .. } => self.generic_type_var(*id),
             TypeVar::Unbound { .. } => "?".to_doc(),
         }
@@ -206,7 +207,7 @@ impl Printer {
     }
 }
 
-fn qualify_type_name(module: &String, typ_name: &str) -> Document<'static> {
+fn qualify_type_name(module: &str, typ_name: &str) -> Document<'static> {
     if module.is_empty() {
         docvec!["aiken.", Document::String(typ_name.to_string())]
     } else {
@@ -551,6 +552,7 @@ mod tests {
                     alias: None,
                 }),
                 alias: Some(Rc::new(TypeAliasAnnotation {
+                    module: None,
                     alias: "Fuzzer".to_string(),
                     parameters: vec!["a".to_string(),],
                     annotation: Annotation::Fn {
@@ -621,6 +623,7 @@ mod tests {
                     alias: None,
                 }),
                 alias: Some(Rc::new(TypeAliasAnnotation {
+                    module: None,
                     alias: "Fuzzer".to_string(),
                     parameters: vec!["a".to_string(),],
                     annotation: Annotation::Fn {
@@ -675,6 +678,7 @@ mod tests {
                     alias: None,
                 }),
                 alias: Some(Rc::new(TypeAliasAnnotation {
+                    module: None,
                     alias: "Identity".to_string(),
                     parameters: vec!["t".to_string()],
                     annotation: Annotation::Var {
@@ -685,6 +689,7 @@ mod tests {
             }),
             "Identity<fn(Bool) -> Bool>",
         );
+        assert_string!(Type::sampler(Type::int()), "Sampler<Int>");
     }
 
     #[test]

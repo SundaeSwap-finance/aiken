@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
 
 use crate::{
-    config::{Config, Dependency},
-    error::Error,
+    config::{Dependency, ProjectConfig},
+    error::{Error, TomlLoadingContext},
     package_name::PackageName,
     paths,
     telemetry::{DownloadSource, Event, EventListener},
@@ -44,6 +44,7 @@ impl LocalPackages {
         let src = fs::read_to_string(&path)?;
 
         let result: Self = toml::from_str(&src).map_err(|e| Error::TomlLoading {
+            ctx: TomlLoadingContext::Package,
             path: path.clone(),
             src: src.clone(),
             named: NamedSource::new(path.display().to_string(), src).into(),
@@ -52,7 +53,7 @@ impl LocalPackages {
                 start: range.start,
                 end: range.end,
             }),
-            help: e.to_string(),
+            help: e.message().to_string(),
         })?;
 
         Ok(result)
@@ -132,7 +133,11 @@ impl From<&Manifest> for LocalPackages {
     }
 }
 
-pub fn download<T>(event_listener: &T, root_path: &Path, config: &Config) -> Result<Manifest, Error>
+pub fn download<T>(
+    event_listener: &T,
+    root_path: &Path,
+    config: &ProjectConfig,
+) -> Result<Manifest, Error>
 where
     T: EventListener,
 {

@@ -1,4 +1,4 @@
-use std::rc::Rc;
+use std::{fmt::Display, rc::Rc};
 
 use crate::ast::{Constant, NamedDeBruijn, Term, Type};
 
@@ -45,12 +45,47 @@ pub enum Context {
     NoFrame,
 }
 
+pub const TERM_COUNT: usize = 9;
+pub const BUILTIN_COUNT: usize = 87;
+
+#[derive(Debug, Clone)]
+pub enum Trace {
+    Log(String),
+    Label(String),
+}
+
+impl Display for Trace {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Trace::Log(log) => f.write_str(log),
+            Trace::Label(label) => f.write_str(label),
+        }
+    }
+}
+
+impl Trace {
+    pub fn unwrap_log(self) -> Option<String> {
+        match self {
+            Trace::Log(log) => Some(log),
+            _ => None,
+        }
+    }
+
+    pub fn unwrap_label(self) -> Option<String> {
+        match self {
+            Trace::Label(label) => Some(label),
+            _ => None,
+        }
+    }
+}
+
 pub struct Machine {
     costs: CostModel,
     pub ex_budget: ExBudget,
     slippage: u32,
     unbudgeted_steps: [u32; 10],
-    pub logs: Vec<String>,
+    pub traces: Vec<Trace>,
+    pub spend_counter: Option<[i64; (TERM_COUNT + BUILTIN_COUNT) * 2]>,
     version: Language,
 }
 
@@ -66,7 +101,25 @@ impl Machine {
             ex_budget: initial_budget,
             slippage,
             unbudgeted_steps: [0; 10],
-            logs: vec![],
+            traces: vec![],
+            spend_counter: None,
+            version,
+        }
+    }
+
+    pub fn new_debug(
+        version: Language,
+        costs: CostModel,
+        initial_budget: ExBudget,
+        slippage: u32,
+    ) -> Machine {
+        Machine {
+            costs,
+            ex_budget: initial_budget,
+            slippage,
+            unbudgeted_steps: [0; 10],
+            traces: vec![],
+            spend_counter: Some([0; (TERM_COUNT + BUILTIN_COUNT) * 2]),
             version,
         }
     }
@@ -352,7 +405,14 @@ impl Machine {
 
         self.spend_budget(cost)?;
 
-        runtime.call(&self.version, &mut self.logs)
+        if let Some(counter) = &mut self.spend_counter {
+            let i = (runtime.fun as usize + TERM_COUNT) * 2;
+
+            counter[i] += cost.mem;
+            counter[i + 1] += cost.cpu;
+        }
+
+        runtime.call(&self.version, &mut self.traces)
     }
 
     fn lookup_var(&mut self, name: &NamedDeBruijn, env: &[Value]) -> Result<Value, Error> {
@@ -388,6 +448,11 @@ impl Machine {
             self.spend_budget(unspent_step_budget)?;
 
             self.unbudgeted_steps[i] = 0;
+
+            if let Some(counter) = &mut self.spend_counter {
+                counter[i * 2] += unspent_step_budget.mem;
+                counter[i * 2 + 1] += unspent_step_budget.cpu;
+            }
         }
 
         self.unbudgeted_steps[9] = 0;

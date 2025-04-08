@@ -1,13 +1,23 @@
-use super::{find_max_execution_units, group_by_module, DownloadSource, Event, EventListener};
+use super::{DownloadSource, Event, EventListener, find_max_execution_units, group_by_module};
 use crate::pretty;
 use aiken_lang::{
     ast::OnTestFailure,
     expr::UntypedExpr,
     format::Formatter,
-    test_framework::{AssertionStyleOptions, PropertyTestResult, TestResult, UnitTestResult},
+    test_framework::{
+        AssertionStyleOptions, BenchmarkResult, PropertyTestResult, TestResult, UnitTestResult,
+    },
 };
 use owo_colors::{OwoColorize, Stream::Stderr};
+use rgb::RGB8;
+use std::sync::LazyLock;
 use uplc::machine::cost_model::ExBudget;
+
+static BENCH_PLOT_COLOR: LazyLock<RGB8> = LazyLock::new(|| RGB8 {
+    r: 250,
+    g: 211,
+    b: 144,
+});
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Terminal;
@@ -105,6 +115,53 @@ impl EventListener for Terminal {
                         .unwrap_or("")
                         .if_supports_color(Stderr, |s| s.blue()),
                     name.if_supports_color(Stderr, |s| s.bright_blue()),
+                );
+            }
+            Event::CollectingTests {
+                matching_module,
+                matching_names,
+            } => {
+                eprintln!(
+                    "{:>13} {tests} {module}",
+                    "Collecting"
+                        .if_supports_color(Stderr, |s| s.bold())
+                        .if_supports_color(Stderr, |s| s.purple()),
+                    tests = if matching_names.is_empty() {
+                        if matching_module.is_some() {
+                            "all tests scenarios"
+                                .if_supports_color(Stderr, |s| s.bold())
+                                .to_string()
+                        } else {
+                            "all tests scenarios".to_string()
+                        }
+                    } else {
+                        format!(
+                            "test{} {}",
+                            if matching_names.len() > 1 { "s" } else { "" },
+                            matching_names
+                                .iter()
+                                .map(|s| format!("*{s}*"))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                                .if_supports_color(Stderr, |s| s.bold())
+                        )
+                    },
+                    module = match matching_module {
+                        None => format!(
+                            "across {}",
+                            if matching_names.is_empty() {
+                                "all modules".to_string()
+                            } else {
+                                "all modules"
+                                    .if_supports_color(Stderr, |s| s.bold())
+                                    .to_string()
+                            }
+                        ),
+                        Some(module) => format!(
+                            "within module(s): {}",
+                            format!("*{module}*").if_supports_color(Stderr, |s| s.bold())
+                        ),
+                    }
                 );
             }
             Event::RunningTests => {
@@ -215,6 +272,58 @@ impl EventListener for Terminal {
                     "dependencies".if_supports_color(Stderr, |s| s.bold())
                 )
             }
+            Event::RunningBenchmarks => {
+                eprintln!(
+                    "{} {}",
+                    " Benchmarking"
+                        .if_supports_color(Stderr, |s| s.bold())
+                        .if_supports_color(Stderr, |s| s.purple()),
+                    "...".if_supports_color(Stderr, |s| s.bold())
+                );
+            }
+            Event::FinishedBenchmarks { seed, benchmarks } => {
+                let (max_mem, max_cpu, max_iter) = find_max_execution_units(&benchmarks);
+
+                for (module, results) in &group_by_module(&benchmarks) {
+                    let title = module
+                        .if_supports_color(Stderr, |s| s.bold())
+                        .if_supports_color(Stderr, |s| s.blue())
+                        .to_string();
+
+                    let benchmarks = results
+                        .iter()
+                        .map(|r| fmt_test(r, max_mem, max_cpu, max_iter, true))
+                        .collect::<Vec<String>>()
+                        .join("\n")
+                        .chars()
+                        .skip(1) // Remove extra first newline
+                        .collect::<String>();
+
+                    let seed_info = format!(
+                        "with {opt}={seed}",
+                        opt = "--seed".if_supports_color(Stderr, |s| s.bold()),
+                        seed = format!("{seed}").if_supports_color(Stderr, |s| s.bold())
+                    );
+
+                    if !benchmarks.is_empty() {
+                        println!();
+                    }
+
+                    println!(
+                        "{}\n",
+                        pretty::indent(
+                            &pretty::open_box(&title, &benchmarks, &seed_info, |border| border
+                                .if_supports_color(Stderr, |s| s.bright_black())
+                                .to_string()),
+                            4
+                        )
+                    );
+                }
+
+                if !benchmarks.is_empty() {
+                    println!();
+                }
+            }
         }
     }
 }
@@ -227,7 +336,23 @@ fn fmt_test(
     styled: bool,
 ) -> String {
     // Status
-    let mut test = if result.is_success() {
+    let mut test = if matches!(result, TestResult::BenchmarkResult { .. }) {
+        format!(
+            "\n{label}{title}\n",
+            label = if result.is_success() {
+                String::new()
+            } else {
+                pretty::style_if(styled, "FAIL ".to_string(), |s| {
+                    s.if_supports_color(Stderr, |s| s.bold())
+                        .if_supports_color(Stderr, |s| s.red())
+                        .to_string()
+                })
+            },
+            title = pretty::style_if(styled, result.title().to_string(), |s| s
+                .if_supports_color(Stderr, |s| s.bright_blue())
+                .to_string())
+        )
+    } else if result.is_success() {
         pretty::style_if(styled, "PASS".to_string(), |s| {
             s.if_supports_color(Stderr, |s| s.bold())
                 .if_supports_color(Stderr, |s| s.green())
@@ -273,15 +398,76 @@ fn fmt_test(
                 if *iterations > 1 { "s" } else { "" }
             );
         }
+        TestResult::BenchmarkResult(BenchmarkResult { error: Some(e), .. }) => {
+            test = format!(
+                "{test}{}",
+                e.to_string().if_supports_color(Stderr, |s| s.red())
+            );
+        }
+        TestResult::BenchmarkResult(BenchmarkResult {
+            measures,
+            error: None,
+            ..
+        }) => {
+            let max_size = measures
+                .iter()
+                .map(|(size, _)| *size)
+                .max()
+                .unwrap_or_default();
+
+            let mem_chart = format!(
+                "{title}\n{chart}",
+                title = "memory units"
+                    .if_supports_color(Stderr, |s| s.yellow())
+                    .if_supports_color(Stderr, |s| s.bold()),
+                chart = plot(
+                    &BENCH_PLOT_COLOR,
+                    measures
+                        .iter()
+                        .map(|(size, budget)| (*size as f32, budget.mem as f32))
+                        .collect::<Vec<_>>(),
+                    max_size
+                )
+            );
+
+            let cpu_chart = format!(
+                "{title}\n{chart}",
+                title = "cpu units"
+                    .if_supports_color(Stderr, |s| s.yellow())
+                    .if_supports_color(Stderr, |s| s.bold()),
+                chart = plot(
+                    &BENCH_PLOT_COLOR,
+                    measures
+                        .iter()
+                        .map(|(size, budget)| (*size as f32, budget.cpu as f32))
+                        .collect::<Vec<_>>(),
+                    max_size
+                )
+            );
+
+            let charts = mem_chart
+                .lines()
+                .zip(cpu_chart.lines())
+                .map(|(l, r)| format!("  {}{r}", pretty::pad_right(l.to_string(), 55, " ")))
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            test = format!("{test}{charts}",);
+        }
     }
 
     // Title
-    test = format!(
-        "{test} {title}",
-        title = pretty::style_if(styled, result.title().to_string(), |s| s
-            .if_supports_color(Stderr, |s| s.bright_blue())
-            .to_string())
-    );
+    test = match result {
+        TestResult::BenchmarkResult(..) => test,
+        TestResult::UnitTestResult(..) | TestResult::PropertyTestResult(..) => {
+            format!(
+                "{test} {title}",
+                title = pretty::style_if(styled, result.title().to_string(), |s| s
+                    .if_supports_color(Stderr, |s| s.bright_blue())
+                    .to_string())
+            )
+        }
+    };
 
     // Annotations
     match result {
@@ -398,12 +584,12 @@ fn fmt_test(
     }
 
     // Traces
-    if !result.traces().is_empty() {
+    if !result.logs().is_empty() {
         test = format!(
             "{test}\n{title}\n{traces}",
             title = "· with traces".if_supports_color(Stderr, |s| s.bold()),
             traces = result
-                .traces()
+                .logs()
                 .iter()
                 .map(|line| { format!("| {line}",) })
                 .collect::<Vec<_>>()
@@ -436,4 +622,15 @@ fn fmt_test_summary<T>(tests: &[&TestResult<T, T>], styled: bool) -> String {
             .if_supports_color(Stderr, |s| s.bold())
             .to_string()),
     )
+}
+
+fn plot(color: &RGB8, points: Vec<(f32, f32)>, max_size: usize) -> String {
+    use textplots::{Chart, ColorPlot, Shape};
+    let mut chart = Chart::new(80, 50, 1.0, max_size as f32);
+    let plot = Shape::Lines(&points);
+    let chart = chart.linecolorplot(&plot, *color);
+    chart.borders();
+    chart.axis();
+    chart.figures();
+    chart.to_string()
 }

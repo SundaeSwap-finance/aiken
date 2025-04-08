@@ -5,8 +5,8 @@ use crate::{
     quickfix,
     quickfix::Quickfix,
     utils::{
-        path_to_uri, span_to_lsp_range, text_edit_replace, uri_to_module_name,
-        COMPILING_PROGRESS_TOKEN, CREATE_COMPILING_PROGRESS_TOKEN,
+        COMPILING_PROGRESS_TOKEN, CREATE_COMPILING_PROGRESS_TOKEN, path_to_uri, span_to_lsp_range,
+        text_edit_replace, uri_to_module_name,
     },
 };
 use aiken_lang::{
@@ -17,7 +17,7 @@ use aiken_lang::{
     tipo::pretty::Printer,
 };
 use aiken_project::{
-    config::{self, Config},
+    config::{self, ProjectConfig},
     error::{Error as ProjectError, GetSource},
     module::CheckedModule,
 };
@@ -25,6 +25,7 @@ use indoc::formatdoc;
 use itertools::Itertools;
 use lsp_server::{Connection, Message};
 use lsp_types::{
+    DocumentFormattingParams, InitializeParams, TextEdit,
     notification::{
         DidChangeTextDocument, DidChangeWatchedFiles, DidCloseTextDocument, DidSaveTextDocument,
         Notification, Progress, PublishDiagnostics, ShowMessage,
@@ -33,7 +34,6 @@ use lsp_types::{
         CodeActionRequest, Completion, Formatting, GotoDefinition, HoverRequest, Request,
         WorkDoneProgressCreate,
     },
-    DocumentFormattingParams, InitializeParams, TextEdit,
 };
 use miette::Diagnostic;
 use std::{
@@ -50,7 +50,7 @@ pub struct Server {
     // Project root directory
     root: PathBuf,
 
-    config: Option<config::Config>,
+    config: Option<config::ProjectConfig>,
 
     /// Files that have been edited in memory
     edited: HashMap<String, String>,
@@ -235,7 +235,7 @@ impl Server {
             }
 
             DidChangeWatchedFiles::METHOD => {
-                if let Ok(config) = Config::load(&self.root) {
+                if let Ok(config) = ProjectConfig::load(&self.root) {
                     self.config = Some(config);
                     self.create_new_compiler();
                     self.compile(connection)?;
@@ -603,7 +603,7 @@ impl Server {
 
     pub fn new(
         initialize_params: InitializeParams,
-        config: Option<config::Config>,
+        config: Option<config::ProjectConfig>,
         root: PathBuf,
     ) -> Self {
         let mut server = Server {
@@ -638,7 +638,7 @@ impl Server {
         self.send_work_done_notification(
             connection,
             lsp_types::WorkDoneProgress::Begin(lsp_types::WorkDoneProgressBegin {
-                title: "Compiling Aiken".into(),
+                title: "Compiling Aiken project".into(),
                 cancellable: Some(false),
                 message: None,
                 percentage: None,

@@ -45,6 +45,21 @@ fn format_nul_byte() {
 }
 
 #[test]
+fn format_allow_comments_in_byte_array() {
+    assert_format!(
+        r#"
+        pub const thing =
+          #[
+            // thing
+            0x12,
+            // wow
+            0x10,
+          ]
+        "#
+    );
+}
+
+#[test]
 fn format_g1_element_constant() {
     assert_format!(
         r#"
@@ -1416,6 +1431,58 @@ fn multiline_if_is_2() {
                 True
                 } else {
                     False }
+        }
+        "#
+    );
+}
+
+#[test]
+fn comment_in_pipeline() {
+    assert_format!(
+        r#"
+        fn foo() {
+            a
+            // stuff
+            // warning: wow
+            |> b
+            // Comment
+            |> c
+        }
+        "#
+    );
+}
+
+#[test]
+fn capture_right_hand_side_assign() {
+    assert_format!(
+        r#"
+        fn foo() {
+            let (_aa, bb, _cc) = bar(foo: _a, _b, _)
+            let _ = baz(_d, [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23])
+            bb
+        }
+        "#
+    );
+}
+
+#[test]
+fn types_as_namespace() {
+    assert_format!(
+        r#"
+        use foo.{ Foo }
+
+        fn predicate(val) {
+          when val is {
+            Foo.I(n) -> n >= 14
+            foo.Foo.B(bytes) -> bytes == "aiken"
+          }
+        }
+
+        test my_test() {
+          and {
+            predicate(foo.Foo.I(42)),
+            predicate(Foo.b("aiken"))
+          }
         }
         "#
     );

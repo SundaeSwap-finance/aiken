@@ -1,5 +1,3 @@
-use chumsky::prelude::*;
-
 use crate::{
     ast,
     expr::UntypedExpr,
@@ -8,6 +6,7 @@ use crate::{
         token::Token,
     },
 };
+use chumsky::prelude::*;
 
 pub fn parser(
     r: Recursive<'_, Token, UntypedExpr, ParseError>,
@@ -17,6 +16,12 @@ pub fn parser(
             .map_with_span(|module, span: ast::Span| (module, span))
             .then_ignore(just(Token::Dot))
             .or_not()
+            .then(
+                select! {Token::UpName { name } => name}
+                    .map_with_span(|name, span| (name, span))
+                    .then_ignore(just(Token::Dot))
+                    .or_not(),
+            )
             .then(select! {Token::UpName { name } => name}.map_with_span(|name, span| (name, span)))
             .then(
                 choice((
@@ -24,24 +29,16 @@ pub fn parser(
                         .then_ignore(just(Token::Colon))
                         .then(choice((
                             r.clone(),
-                            select! {Token::DiscardName {name} => name }.validate(
-                                |_name, span, emit| {
-                                    emit(ParseError::expected_input_found(
-                                        span,
-                                        None,
-                                        Some(error::Pattern::Discard),
-                                    ));
-
-                                    UntypedExpr::Var {
-                                        location: span,
-                                        name: ast::CAPTURE_VARIABLE.to_string(),
-                                    }
+                            choice((select! {Token::DiscardName {name} => name }.map_with_span(
+                                |name, span| UntypedExpr::Var {
+                                    location: span,
+                                    name,
                                 },
-                            ),
+                            ),)),
                         )))
                         .map_with_span(|(label, value), span| ast::CallArg {
                             location: span,
-                            value,
+                            value: Some(value),
                             label: Some(label),
                         }),
                     choice((
@@ -106,7 +103,7 @@ pub fn parser(
                     )
                     .map(|(value, name)| ast::CallArg {
                         location: value.location(),
-                        value,
+                        value: Some(value),
                         label: Some(name),
                     }),
                 ))
@@ -118,6 +115,12 @@ pub fn parser(
             .map_with_span(|module, span| (module, span))
             .then_ignore(just(Token::Dot))
             .or_not()
+            .then(
+                select! {Token::UpName { name } => name}
+                    .map_with_span(|name, span| (name, span))
+                    .then_ignore(just(Token::Dot))
+                    .or_not(),
+            )
             .then(select! {Token::UpName { name } => name}.map_with_span(|name, span| (name, span)))
             .then(
                 select! {Token::Name {name} => name}
@@ -133,24 +136,16 @@ pub fn parser(
                     .or_not()
                     .then(choice((
                         r.clone(),
-                        select! {Token::DiscardName {name} => name }.validate(
-                            |_name, span, emit| {
-                                emit(ParseError::expected_input_found(
-                                    span,
-                                    None,
-                                    Some(error::Pattern::Discard),
-                                ));
-
-                                UntypedExpr::Var {
-                                    location: span,
-                                    name: ast::CAPTURE_VARIABLE.to_string(),
-                                }
-                            },
-                        ),
+                        select! {Token::DiscardName {name} => name }.map_with_span(|name, span| {
+                            UntypedExpr::Var {
+                                location: span,
+                                name,
+                            }
+                        }),
                     )))
                     .map(|(_label, value)| ast::CallArg {
                         location: value.location(),
-                        value,
+                        value: Some(value),
                         label: None,
                     })
                     .separated_by(just(Token::Comma))
@@ -158,29 +153,48 @@ pub fn parser(
                     .delimited_by(just(Token::LeftParen), just(Token::RightParen)),
             ),
     ))
-    .map_with_span(|((module, (name, n_span)), arguments), span| {
-        let fun = if let Some((module, m_span)) = module {
-            UntypedExpr::FieldAccess {
-                location: m_span.union(n_span),
-                label: name,
-                container: Box::new(UntypedExpr::Var {
-                    location: m_span,
-                    name: module,
-                }),
-            }
-        } else {
-            UntypedExpr::Var {
-                location: n_span,
-                name,
-            }
-        };
+    .map_with_span(
+        |(((module, namespace), (label, label_span)), arguments), span| {
+            let fun = match (module, namespace) {
+                (Some((module, module_span)), Some((namespace, namespace_span))) => {
+                    UntypedExpr::FieldAccess {
+                        location: module_span.union(namespace_span).union(label_span),
+                        label,
+                        container: Box::new(UntypedExpr::FieldAccess {
+                            location: module_span.union(namespace_span),
+                            label: namespace,
+                            container: Box::new(UntypedExpr::Var {
+                                location: module_span,
+                                name: module,
+                            }),
+                        }),
+                    }
+                }
+                (None, Some((namespace, namespace_span))) => UntypedExpr::FieldAccess {
+                    location: namespace_span.union(label_span),
+                    label,
+                    container: Box::new(UntypedExpr::Var {
+                        location: namespace_span,
+                        name: namespace,
+                    }),
+                },
+                (Some((module, module_span)), None) => UntypedExpr::FieldAccess {
+                    location: module_span.union(label_span),
+                    label,
+                    container: Box::new(UntypedExpr::Var {
+                        location: module_span,
+                        name: module,
+                    }),
+                },
+                (None, None) => UntypedExpr::Var {
+                    location: label_span,
+                    name: label,
+                },
+            };
 
-        UntypedExpr::Call {
-            arguments,
-            fun: Box::new(fun),
-            location: span,
-        }
-    })
+            fun.call(arguments, span)
+        },
+    )
 }
 
 #[cfg(test)]

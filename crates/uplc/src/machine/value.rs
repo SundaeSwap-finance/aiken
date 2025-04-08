@@ -1,4 +1,8 @@
-use super::{indexed_term::IndexedTerm, runtime::BuiltinRuntime, Error};
+use super::{
+    Error,
+    indexed_term::IndexedTerm,
+    runtime::{self, BuiltinRuntime},
+};
 use crate::{
     ast::{Constant, NamedDeBruijn, Type},
     builtins::DefaultFunction,
@@ -170,6 +174,19 @@ impl Value {
         Ok(list)
     }
 
+    pub(super) fn unwrap_int_list(&self) -> Result<&Vec<Constant>, Error> {
+        let inner = self.unwrap_constant()?;
+
+        let Constant::ProtoList(Type::Integer, list) = inner else {
+            return Err(Error::TypeMismatch(
+                Type::List(Type::Integer.into()),
+                inner.into(),
+            ));
+        };
+
+        Ok(list)
+    }
+
     pub(super) fn unwrap_bls12_381_g1_element(&self) -> Result<&blst::blst_p1, Error> {
         let inner = self.unwrap_constant()?;
 
@@ -206,6 +223,42 @@ impl Value {
 
     pub fn is_bool(&self) -> bool {
         matches!(self, Value::Con(b) if matches!(b.as_ref(), Constant::Bool(_)))
+    }
+
+    pub fn cost_as_size(&self, func: DefaultFunction) -> Result<i64, Error> {
+        let size = self.unwrap_integer()?;
+
+        if size.is_negative() {
+            let error = match func {
+                DefaultFunction::IntegerToByteString => {
+                    Error::IntegerToByteStringNegativeSize(size.clone())
+                }
+                DefaultFunction::ReplicateByte => Error::ReplicateByteNegativeSize(size.clone()),
+                _ => unreachable!(),
+            };
+            return Err(error);
+        }
+
+        if size > &BigInt::from(runtime::INTEGER_TO_BYTE_STRING_MAXIMUM_OUTPUT_LENGTH) {
+            let error = match func {
+                DefaultFunction::IntegerToByteString => Error::IntegerToByteStringSizeTooBig(
+                    size.clone(),
+                    runtime::INTEGER_TO_BYTE_STRING_MAXIMUM_OUTPUT_LENGTH,
+                ),
+                DefaultFunction::ReplicateByte => Error::ReplicateByteSizeTooBig(
+                    size.clone(),
+                    runtime::INTEGER_TO_BYTE_STRING_MAXIMUM_OUTPUT_LENGTH,
+                ),
+                _ => unreachable!(),
+            };
+            return Err(error);
+        }
+
+        let arg1: i64 = u64::try_from(size).unwrap().try_into().unwrap();
+
+        let arg1_exmem = if arg1 == 0 { 0 } else { ((arg1 - 1) / 8) + 1 };
+
+        Ok(arg1_exmem)
     }
 
     // TODO: Make this to_ex_mem not recursive.
@@ -428,7 +481,7 @@ pub fn to_pallas_bigint(n: &BigInt) -> conway::BigInt {
 mod tests {
     use crate::{
         ast::Constant,
-        machine::value::{integer_log2, Value},
+        machine::value::{Value, integer_log2},
     };
     use num_bigint::BigInt;
 

@@ -1,6 +1,6 @@
 use crate::{
-    config::{Config, Platform},
     CheckedModule,
+    config::{Platform, ProjectConfig},
 };
 use aiken_lang::{ast::Span, line_numbers::LineNumbers};
 use camino::{Utf8Component, Utf8Path};
@@ -12,7 +12,7 @@ pub struct SourceLinker {
 }
 
 impl SourceLinker {
-    pub fn new(root: &Path, config: &Config, module: &CheckedModule) -> Self {
+    pub fn new(root: &Path, config: &ProjectConfig, module: &CheckedModule) -> Self {
         let utf8_path = <&Utf8Path>::try_from(
             module
                 .input_path

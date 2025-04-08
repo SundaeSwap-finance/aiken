@@ -8,7 +8,9 @@ use crate::{
     module::{CheckedModule, CheckedModules},
 };
 use aiken_lang::{
-    ast::TypedFunction, gen_uplc::CodeGenerator, plutus_version::PlutusVersion,
+    ast::{ArgName, Span, TypedArg, TypedFunction},
+    gen_uplc::CodeGenerator,
+    plutus_version::PlutusVersion,
     source_map::SourceMap,
 };
 use miette::NamedSource;
@@ -25,6 +27,8 @@ pub struct Export {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     #[serde(default)]
     pub parameters: Vec<Parameter>,
+
+    pub return_type: Parameter,
 
     #[serde(flatten)]
     pub program: SerializableProgram,
@@ -71,6 +75,38 @@ impl Export {
             })
             .collect::<Result<_, _>>()?;
 
+        let return_type = Annotated::from_type(
+            modules.into(),
+            blueprint::validator::tipo_or_annotation(
+                module,
+                &TypedArg {
+                    arg_name: ArgName::Discarded {
+                        name: "".to_string(),
+                        label: "".to_string(),
+                        location: Span::empty(),
+                    },
+                    location: Span::empty(),
+                    annotation: func.return_annotation.clone(),
+                    doc: None,
+                    is_validator_param: false,
+                    tipo: func.return_type.clone(),
+                },
+            ),
+            &mut definitions,
+        )
+        .map(|schema| Parameter {
+            title: Some("return_type".to_string()),
+            schema: Declaration::Referenced(schema),
+        })
+        .map_err(|error| blueprint::Error::Schema {
+            error,
+            location: func.location,
+            source_code: NamedSource::new(
+                module.input_path.display().to_string(),
+                module.code.clone(),
+            ),
+        })?;
+
         let program = generator
             .generate_raw(&func.body, &func.arguments, &module.name)
             .to_debruijn()
@@ -88,6 +124,7 @@ impl Export {
             name: format!("{}.{}", &module.name, &func.name),
             doc: func.doc.clone(),
             parameters,
+            return_type,
             program,
             definitions,
             source_map,

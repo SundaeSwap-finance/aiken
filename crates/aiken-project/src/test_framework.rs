@@ -5,6 +5,7 @@ mod test {
         utils,
     };
     use aiken_lang::{
+        IdGenerator,
         ast::{DataTypeKey, Definition, ModuleKind, TraceLevel, Tracing, TypedDataType},
         builtins,
         expr::UntypedExpr,
@@ -14,7 +15,6 @@ mod test {
         parser::{self, extra::ModuleExtra},
         plutus_version::PlutusVersion,
         test_framework::*,
-        IdGenerator,
     };
     use indexmap::IndexMap;
     use indoc::indoc;
@@ -102,6 +102,7 @@ mod test {
                 test.to_owned(),
                 module_name.to_string(),
                 PathBuf::new(),
+                RunnableKind::Test,
             ),
             data_types,
         )
@@ -215,6 +216,9 @@ mod test {
             (Test::UnitTest(..), _) => {
                 panic!("Expected to yield a PropertyTest but found a UnitTest")
             }
+            (Test::Benchmark(..), _) => {
+                panic!("Expected to yield a PropertyTest but found a Benchmark")
+            }
         }
     }
 
@@ -243,13 +247,14 @@ mod test {
             }
         "#});
 
-        assert!(prop
-            .run::<()>(
+        assert!(
+            TestResult::PropertyTestResult::<(), _>(prop.run(
                 42,
                 PropertyTest::DEFAULT_MAX_SUCCESS,
                 &PlutusVersion::default()
-            )
-            .is_success());
+            ))
+            .is_success()
+        );
     }
 
     #[test]
@@ -271,23 +276,20 @@ mod test {
             }
         "#});
 
-        match prop.run::<()>(
+        let result = prop.run(
             42,
             PropertyTest::DEFAULT_MAX_SUCCESS,
             &PlutusVersion::default(),
-        ) {
-            TestResult::UnitTestResult(..) => unreachable!("property returned unit-test result ?!"),
-            TestResult::PropertyTestResult(result) => {
-                assert!(
-                    result
-                        .labels
-                        .iter()
-                        .eq(vec![(&"head".to_string(), &53), (&"tail".to_string(), &47)]),
-                    "labels: {:#?}",
-                    result.labels
-                )
-            }
-        }
+        );
+
+        assert!(
+            result
+                .labels
+                .iter()
+                .eq(vec![(&"head".to_string(), &53), (&"tail".to_string(), &47)]),
+            "labels: {:#?}",
+            result.labels
+        );
     }
 
     #[test]

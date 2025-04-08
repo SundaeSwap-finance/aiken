@@ -1,4 +1,4 @@
-use super::{indexed_term::IndexedTerm, ExBudget, Value};
+use super::{ExBudget, Value, indexed_term::IndexedTerm};
 use crate::ast::{NamedDeBruijn, Type};
 use num_bigint::BigInt;
 use std::string::FromUtf8Error;
@@ -75,6 +75,8 @@ pub enum Error {
     MachineNeverReachedDone,
     #[error("integerToByteString encountered negative size\n{:>13} {0}", "Size")]
     IntegerToByteStringNegativeSize(BigInt),
+    #[error("replicateByte encountered negative size\n{:>13} {0}", "Size")]
+    ReplicateByteNegativeSize(BigInt),
     #[error("integerToByteString encountered negative input\n{:>13} {0}", "Input")]
     IntegerToByteStringNegativeInput(BigInt),
     #[error(
@@ -83,6 +85,12 @@ pub enum Error {
         "Maximum"
     )]
     IntegerToByteStringSizeTooBig(BigInt, i64),
+    #[error(
+        "bytes size beyond limit when replicate byte\n{:>13} {0}\n{:>13} {1}",
+        "Size",
+        "Maximum"
+    )]
+    ReplicateByteSizeTooBig(BigInt, i64),
     #[error(
         "bytes size below limit when converting from integer\n{:>13} {0}\n{:>13} {1}",
         "Size",
@@ -120,6 +128,16 @@ pub enum Error {
     DeserialisationError(String, Value),
     #[error("integer overflow")]
     OverflowError,
+    #[error("{0} is not within the bounds of a Natural")]
+    OutsideNaturalBounds(BigInt),
+    #[error("{0} is not within the bounds of a Byte")]
+    OutsideByteBounds(BigInt),
+    #[error("readBit: index out of bounds")]
+    ReadBitOutOfBounds,
+    #[error("writeBits: index out of bounds")]
+    WriteBitsOutOfBounds,
+    #[error("illegal operation on empty ByteArray")]
+    EmptyByteArray,
     #[error("blst error {0:?}")]
     Blst(blst::BLST_ERROR),
     #[error("blst::hashToGroup")]

@@ -1,28 +1,30 @@
 use super::{
+    RecordAccessor, Type, ValueConstructor, ValueConstructorVariant,
     environment::{
-        assert_no_labeled_arguments, collapse_links, generalise, EntityKind, Environment,
+        EntityKind, Environment, assert_no_labeled_arguments, collapse_links, generalise,
     },
     error::{Error, Warning},
     hydrator::Hydrator,
     pattern::PatternTyper,
     pipe::PipeTyper,
-    RecordAccessor, Type, ValueConstructor, ValueConstructorVariant,
 };
 use crate::{
+    IdGenerator,
     ast::{
         self, Annotation, ArgName, AssignmentKind, AssignmentPattern, BinOp, Bls12_381Point,
-        ByteArrayFormatPreference, CallArg, Curve, Function, IfBranch, LogicalOpChainKind, Pattern,
-        RecordUpdateSpread, Span, TraceKind, TraceLevel, Tracing, TypedArg, TypedCallArg,
-        TypedClause, TypedIfBranch, TypedPattern, TypedRecordUpdateArg, TypedValidator, UnOp,
-        UntypedArg, UntypedAssignmentKind, UntypedClause, UntypedFunction, UntypedIfBranch,
-        UntypedPattern, UntypedRecordUpdateArg,
+        ByteArrayFormatPreference, CallArg, Curve, Function, IfBranch, LogicalOpChainKind,
+        Namespace, Pattern, RecordUpdateSpread, Span, TraceKind, TraceLevel, Tracing, TypedArg,
+        TypedCallArg, TypedClause, TypedIfBranch, TypedPattern, TypedRecordUpdateArg,
+        TypedValidator, UnOp, UntypedArg, UntypedAssignmentKind, UntypedClause, UntypedFunction,
+        UntypedIfBranch, UntypedPattern, UntypedRecordUpdateArg,
     },
-    builtins::{from_default_function, BUILTIN},
+    builtins::{BUILTIN, from_default_function},
     expr::{FnStyle, TypedExpr, UntypedExpr},
     format,
     parser::token::Base,
-    tipo::{fields::FieldMap, DefaultFunction, ModuleKind, PatternConstructor, TypeVar},
-    IdGenerator,
+    tipo::{
+        DefaultFunction, ModuleKind, PatternConstructor, TypeConstructor, TypeVar, fields::FieldMap,
+    },
 };
 use std::{
     cmp::Ordering,
@@ -402,7 +404,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
                 module_alias,
                 label,
                 ..
-            } => (Some(module_alias), label),
+            } => (Some(Namespace::Module(module_alias.to_string())), label),
 
             TypedExpr::Var { name, .. } => (None, name),
 
@@ -411,7 +413,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
 
         Ok(self
             .environment
-            .get_value_constructor(module, name, location)?
+            .get_value_constructor(module.as_ref(), name, location)?
             .field_map())
     }
 
@@ -553,7 +555,11 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
                 bytes,
                 preferred_format,
                 location,
-            } => self.infer_bytearray(bytes, preferred_format, location),
+            } => self.infer_bytearray(
+                bytes.into_iter().map(|(b, _)| b).collect(),
+                preferred_format,
+                location,
+            ),
 
             UntypedExpr::CurvePoint {
                 location,
@@ -790,12 +796,12 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         args: Vec<UntypedRecordUpdateArg>,
         location: Span,
     ) -> Result<TypedExpr, Error> {
-        let (module, name): (Option<String>, String) = match self.infer(constructor.clone())? {
+        let (module, name): (Option<Namespace>, String) = match self.infer(constructor.clone())? {
             TypedExpr::ModuleSelect {
                 module_alias,
                 label,
                 ..
-            } => (Some(module_alias), label),
+            } => (Some(Namespace::Module(module_alias)), label),
 
             TypedExpr::Var { name, .. } => (None, name),
 
@@ -968,7 +974,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
                 location,
             } => {
                 if let UntypedExpr::Var {
-                    name: ref module,
+                    name: module,
                     location: module_location,
                 } = container.as_ref()
                 {
@@ -1066,6 +1072,69 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
             return shortcircuit;
         }
 
+        // In case where we find an uppercase var name in a record access chain, we treat the type
+        // as a namespace and lookup the next constructor as if it were imported from the module's
+        // the type originally belong to.
+        match container {
+            UntypedExpr::Var {
+                name: ref type_name,
+                location: type_location,
+            } if TypeConstructor::might_be(type_name) => {
+                return self.infer_type_constructor_access(
+                    (type_name, type_location),
+                    (
+                        &label,
+                        access_location.map(|start, end| (start + type_name.len() + 1, end)),
+                    ),
+                );
+            }
+
+            UntypedExpr::FieldAccess {
+                location: type_location,
+                label: ref type_name,
+                container: ref type_container,
+            } if TypeConstructor::might_be(type_name) => {
+                if let UntypedExpr::Var {
+                    name: module_name,
+                    location: module_location,
+                } = type_container.as_ref()
+                {
+                    if TypeConstructor::might_be(module_name) {
+                        return Err(Error::InvalidFieldAccess {
+                            location: access_location,
+                        });
+                    }
+
+                    // Lookup the module using the declared name (which may have been rebind with
+                    // 'as'), to obtain its _full unambiguous name_.
+                    let (_, module) = self
+                        .environment
+                        .imported_modules
+                        .get(module_name)
+                        .ok_or_else(|| {
+                            self.environment
+                                .err_unknown_module(module_name.to_string(), *module_location)
+                        })?;
+
+                    return self.infer_inner_type_constructor_access(
+                        (module.name.as_str(), *module_location),
+                        (
+                            type_name,
+                            type_location.map(|start, end| (start + module_name.len() + 1, end)),
+                        ),
+                        (
+                            &label,
+                            access_location.map(|start, end| {
+                                (start + module_name.len() + type_name.len() + 2, end)
+                            }),
+                        ),
+                    );
+                }
+            }
+
+            _ => (),
+        };
+
         // Attempt to infer the container as a record access. If that fails, we may be shadowing the name
         // of an imported module, so attempt to infer the container as a module access.
         // TODO: Remove this cloning
@@ -1073,7 +1142,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
             Ok(record_access) => Ok(record_access),
 
             Err(err) => match container {
-                UntypedExpr::Var { name, location } => {
+                UntypedExpr::Var { name, location } if !TypeConstructor::might_be(&name) => {
                     let module_access =
                         self.infer_module_access(&name, label, &location, access_location);
 
@@ -1104,15 +1173,9 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
                 .environment
                 .imported_modules
                 .get(module_alias)
-                .ok_or_else(|| Error::UnknownModule {
-                    name: module_alias.to_string(),
-                    location: *module_location,
-                    known_modules: self
-                        .environment
-                        .importable_modules
-                        .keys()
-                        .map(|t| t.to_string())
-                        .collect(),
+                .ok_or_else(|| {
+                    self.environment
+                        .err_unknown_module(module_alias.to_string(), *module_location)
                 })?;
 
             let constructor =
@@ -1161,15 +1224,66 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
     }
 
     #[allow(clippy::result_large_err)]
+    fn infer_type_constructor_access(
+        &mut self,
+        (type_name, type_location): (&str, Span),
+        (label, label_location): (&str, Span),
+    ) -> Result<TypedExpr, Error> {
+        self.environment.increment_usage(type_name);
+
+        let parent_type = self
+            .environment
+            .module_types
+            .get(type_name)
+            .ok_or_else(|| Error::UnknownType {
+                location: type_location,
+                name: type_name.to_string(),
+                types: self.environment.known_type_names(),
+            })?;
+
+        let module_name = parent_type.module.clone();
+
+        self.infer_inner_type_constructor_access(
+            (module_name.as_str(), type_location),
+            (type_name, type_location),
+            (label, label_location),
+        )
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn infer_inner_type_constructor_access(
+        &mut self,
+        (module_name, module_location): (&str, Span),
+        (type_name, type_location): (&str, Span),
+        (label, label_location): (&str, Span),
+    ) -> Result<TypedExpr, Error> {
+        self.environment.get_fully_qualified_value_constructor(
+            (module_name, module_location),
+            (type_name, type_location),
+            (label, label_location),
+        )?;
+
+        self.environment.unused_modules.remove(module_name);
+
+        self.infer_module_access(
+            &self
+                .environment
+                .local_module_name(module_name, module_location)?,
+            label.to_string(),
+            &type_location,
+            label_location,
+        )
+    }
+
+    #[allow(clippy::result_large_err)]
     fn infer_record_access(
         &mut self,
         record: UntypedExpr,
         label: String,
         location: Span,
     ) -> Result<TypedExpr, Error> {
-        // Infer the type of the (presumed) record
+        // Infer the type of the (presumed) record.
         let record = self.infer(record)?;
-
         self.infer_known_record_access(record, label, location)
     }
 
@@ -1968,11 +2082,12 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         PipeTyper::infer(self, expressions)
     }
 
+    #[allow(clippy::result_large_err)]
     fn backpass(
         &mut self,
         breakpoint: UntypedExpr,
         mut continuation: Vec<UntypedExpr>,
-    ) -> UntypedExpr {
+    ) -> Result<UntypedExpr, Error> {
         let UntypedExpr::Assignment {
             location,
             value,
@@ -1982,6 +2097,15 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         else {
             unreachable!("backpass misuse: breakpoint isn't an Assignment ?!");
         };
+
+        if continuation.is_empty() {
+            return Err(Error::LastExpressionIsAssignment {
+                location,
+                expr: *value,
+                patterns: patterns.clone(),
+                kind,
+            });
+        }
 
         let value_location = value.location();
 
@@ -2099,11 +2223,11 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
                     value: UntypedExpr::lambda(names, continuation, lambda_span),
                 });
 
-                UntypedExpr::Call {
+                Ok(UntypedExpr::Call {
                     location: call_location,
                     fun,
                     arguments: new_arguments,
-                }
+                })
             }
 
             // This typically occurs on function captures. We do not try to assert anything on the
@@ -2134,15 +2258,15 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
                 };
 
                 if arguments.is_empty() {
-                    call
+                    Ok(call)
                 } else {
-                    UntypedExpr::Fn {
+                    Ok(UntypedExpr::Fn {
                         location: call_location,
                         fn_style,
                         arguments,
                         body: call.into(),
                         return_annotation,
-                    }
+                    })
                 }
             }
 
@@ -2150,7 +2274,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
             // with our continuation. If the expression isn't callable? No problem, the
             // type-checker will catch that eventually in exactly the same way as if the code was
             // written like that to begin with.
-            _ => UntypedExpr::Call {
+            _ => Ok(UntypedExpr::Call {
                 location: call_location,
                 fun: value,
                 arguments: vec![CallArg {
@@ -2158,7 +2282,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
                     label: None,
                     value: UntypedExpr::lambda(names, continuation, lambda_span),
                 }],
-            },
+            }),
         }
     }
 
@@ -2201,7 +2325,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         }
 
         if let Some(breakpoint) = breakpoint {
-            prefix.push(self.backpass(breakpoint, suffix));
+            prefix.push(self.backpass(breakpoint, suffix)?);
             return self.infer_seq(location, prefix);
         }
 
@@ -2386,6 +2510,7 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
 
     #[allow(clippy::result_large_err)]
     fn infer_trace_arg(&mut self, arg: UntypedExpr) -> Result<TypedExpr, Error> {
+        let location = arg.location();
         let typed_arg = self.infer(arg)?;
         match self.unify(
             Type::string(),
@@ -2394,6 +2519,12 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
             false,
         ) {
             Err(_) => {
+                if matches!(self.tracing.trace_level(false), TraceLevel::Compact) {
+                    self.environment
+                        .warnings
+                        .push(Warning::CompactTraceLabelIsNotstring { location });
+                }
+
                 self.unify(Type::data(), typed_arg.tipo(), typed_arg.location(), true)?;
                 Ok(diagnose_expr(typed_arg))
             }
@@ -2426,44 +2557,38 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
             })
         }
 
+        let label = self.infer_trace_arg(label)?;
+
+        let text = if typed_arguments.is_empty() {
+            label.clone()
+        } else {
+            let delimiter = |ix| TypedExpr::String {
+                location: Span::empty(),
+                tipo: Type::string(),
+                value: if ix == 0 { ": " } else { ", " }.to_string(),
+            };
+            typed_arguments
+                .into_iter()
+                .enumerate()
+                .fold(label.clone(), |text, (ix, arg)| {
+                    append_string_expr(append_string_expr(text, delimiter(ix)), arg)
+                })
+        };
+
         match self.tracing.trace_level(false) {
             TraceLevel::Silent => Ok(then),
-            TraceLevel::Compact => {
-                let text = self.infer(label)?;
-                self.unify(Type::string(), text.tipo(), text.location(), false)?;
-                Ok(TypedExpr::Trace {
-                    location,
-                    tipo,
-                    then: Box::new(then),
-                    text: Box::new(text),
-                })
-            }
-            TraceLevel::Verbose => {
-                let label = self.infer_trace_arg(label)?;
-
-                let text = if typed_arguments.is_empty() {
-                    label
-                } else {
-                    let delimiter = |ix| TypedExpr::String {
-                        location: Span::empty(),
-                        tipo: Type::string(),
-                        value: if ix == 0 { ": " } else { ", " }.to_string(),
-                    };
-                    typed_arguments
-                        .into_iter()
-                        .enumerate()
-                        .fold(label, |text, (ix, arg)| {
-                            append_string_expr(append_string_expr(text, delimiter(ix)), arg)
-                        })
-                };
-
-                Ok(TypedExpr::Trace {
-                    location,
-                    tipo,
-                    then: Box::new(then),
-                    text: Box::new(text),
-                })
-            }
+            TraceLevel::Compact => Ok(TypedExpr::Trace {
+                location,
+                tipo,
+                then: Box::new(then),
+                text: Box::new(label),
+            }),
+            TraceLevel::Verbose => Ok(TypedExpr::Trace {
+                location,
+                tipo,
+                then: Box::new(then),
+                text: Box::new(text),
+            }),
         }
     }
 
@@ -2481,10 +2606,30 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
                     self.environment
                         .get_variable(name)
                         .cloned()
-                        .ok_or_else(|| Error::UnknownVariable {
-                            location: *location,
-                            name: name.to_string(),
-                            variables: self.environment.local_value_names(),
+                        .ok_or_else(|| {
+                            if TypeConstructor::might_be(name) {
+                                Error::UnknownTypeConstructor {
+                                    location: *location,
+                                    name: name.to_string(),
+                                    constructors: self
+                                        .environment
+                                        .local_value_names()
+                                        .into_iter()
+                                        .filter(|s| TypeConstructor::might_be(s))
+                                        .collect::<Vec<_>>(),
+                                }
+                            } else {
+                                Error::UnknownVariable {
+                                    location: *location,
+                                    name: name.to_string(),
+                                    variables: self
+                                        .environment
+                                        .local_value_names()
+                                        .into_iter()
+                                        .filter(|s| !TypeConstructor::might_be(s))
+                                        .collect::<Vec<_>>(),
+                                }
+                            }
                         })?;
 
                 if let ValueConstructorVariant::ModuleFn { name: fn_name, .. } =
@@ -2531,15 +2676,9 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
                     .environment
                     .imported_modules
                     .get(module_name)
-                    .ok_or_else(|| Error::UnknownModule {
-                        location: *location,
-                        name: module_name.to_string(),
-                        known_modules: self
-                            .environment
-                            .importable_modules
-                            .keys()
-                            .map(|t| t.to_string())
-                            .collect(),
+                    .ok_or_else(|| {
+                        self.environment
+                            .err_unknown_module(module_name.to_string(), *location)
                     })?;
 
                 module

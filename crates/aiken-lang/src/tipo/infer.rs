@@ -1,22 +1,28 @@
 use super::{
+    TypeInfo, ValueConstructor, ValueConstructorVariant,
     environment::{EntityKind, Environment},
     error::{Error, UnifyErrorSituation, Warning},
     expr::ExprTyper,
     hydrator::Hydrator,
-    TypeInfo, ValueConstructor, ValueConstructorVariant,
 };
 use crate::{
+    IdGenerator,
     ast::{
         Annotation, ArgBy, ArgName, ArgVia, DataType, Definition, Function, ModuleConstant,
         ModuleKind, RecordConstructor, RecordConstructorArg, Tracing, TypeAlias, TypedArg,
         TypedDefinition, TypedModule, TypedValidator, UntypedArg, UntypedDefinition, UntypedModule,
         UntypedPattern, UntypedValidator, Use, Validator,
     },
-    expr::{TypedExpr, UntypedAssignmentKind},
-    tipo::{expr::infer_function, Span, Type, TypeVar},
-    IdGenerator,
+    expr::{TypedExpr, UntypedAssignmentKind, UntypedExpr},
+    parser::token::Token,
+    tipo::{Span, Type, TypeVar, expr::infer_function},
 };
-use std::{borrow::Borrow, collections::HashMap, ops::Deref, rc::Rc};
+use std::{
+    borrow::Borrow,
+    collections::{BTreeSet, HashMap},
+    ops::Deref,
+    rc::Rc,
+};
 
 impl UntypedModule {
     #[allow(clippy::too_many_arguments)]
@@ -81,6 +87,7 @@ impl UntypedModule {
                 Definition::Validator { .. } => (),
                 Definition::Fn { .. }
                 | Definition::Test { .. }
+                | Definition::Benchmark { .. }
                 | Definition::TypeAlias { .. }
                 | Definition::DataType { .. }
                 | Definition::Use { .. } => not_consts.push(def),
@@ -114,7 +121,13 @@ impl UntypedModule {
             .module_types
             .retain(|_, info| info.public && info.module == module_name);
 
+        let own_types = environment.module_types.keys().collect::<BTreeSet<_>>();
+
         environment.module_values.retain(|_, info| info.public);
+
+        environment
+            .module_types_constructors
+            .retain(|k, _| own_types.contains(k));
 
         environment
             .accessors
@@ -346,67 +359,8 @@ fn infer_definition(
                         });
                     }
 
-                    let typed_via = ExprTyper::new(environment, tracing).infer(arg.via.clone())?;
-
-                    let hydrator: &mut Hydrator = hydrators.get_mut(&f.name).unwrap();
-
-                    let provided_inner_type = arg
-                        .arg
-                        .annotation
-                        .as_ref()
-                        .map(|ann| hydrator.type_from_annotation(ann, environment))
-                        .transpose()?;
-
-                    let (inferred_annotation, inferred_inner_type) = infer_fuzzer(
-                        environment,
-                        provided_inner_type.clone(),
-                        &typed_via.tipo(),
-                        &arg.via.location(),
-                    )?;
-
-                    // Ensure that the annotation, if any, matches the type inferred from the
-                    // Fuzzer.
-                    if let Some(provided_inner_type) = provided_inner_type {
-                        if !arg
-                            .arg
-                            .annotation
-                            .as_ref()
-                            .unwrap()
-                            .is_logically_equal(&inferred_annotation)
-                        {
-                            return Err(Error::CouldNotUnify {
-                                location: arg.arg.location,
-                                expected: inferred_inner_type.clone(),
-                                given: provided_inner_type.clone(),
-                                situation: Some(UnifyErrorSituation::FuzzerAnnotationMismatch),
-                                rigid_type_names: hydrator.rigid_names(),
-                            });
-                        }
-                    }
-
-                    // Replace the pre-registered type for the test function, to allow inferring
-                    // the function body with the right type arguments.
-                    let scope = environment
-                        .scope
-                        .get_mut(&f.name)
-                        .expect("Could not find preregistered type for test");
-                    if let Type::Fn {
-                        ref ret,
-                        ref alias,
-                        args: _,
-                    } = scope.tipo.as_ref()
-                    {
-                        scope.tipo = Rc::new(Type::Fn {
-                            ret: ret.clone(),
-                            args: vec![inferred_inner_type.clone()],
-                            alias: alias.clone(),
-                        })
-                    }
-
-                    Ok((
-                        Some((typed_via, inferred_inner_type)),
-                        Some(inferred_annotation),
-                    ))
+                    extract_via_information(&f, arg, hydrators, environment, tracing, infer_fuzzer)
+                        .map(|(typed_via, annotation)| (Some(typed_via), Some(annotation)))
                 }
                 None => Ok((None, None)),
             }?;
@@ -456,6 +410,59 @@ fn infer_definition(
                     }
                     None => vec![],
                 },
+                return_annotation: typed_f.return_annotation,
+                return_type: typed_f.return_type,
+                body: typed_f.body,
+                on_test_failure: typed_f.on_test_failure,
+                end_position: typed_f.end_position,
+            }))
+        }
+
+        Definition::Benchmark(f) => {
+            let err_incorrect_arity = || {
+                Err(Error::IncorrectBenchmarkArity {
+                    location: f
+                        .location
+                        .map(|start, end| (start + Token::Benchmark.to_string().len() + 1, end)),
+                })
+            };
+
+            let (typed_via, annotation) = match f.arguments.first() {
+                None => return err_incorrect_arity(),
+                Some(arg) => {
+                    if f.arguments.len() > 1 {
+                        return err_incorrect_arity();
+                    }
+
+                    extract_via_information(&f, arg, hydrators, environment, tracing, infer_sampler)
+                }
+            }?;
+
+            let typed_f = infer_function(&f.into(), module_name, hydrators, environment, tracing)?;
+
+            let arguments = {
+                let arg = typed_f
+                    .arguments
+                    .first()
+                    .expect("has exactly one argument")
+                    .to_owned();
+
+                vec![ArgVia {
+                    arg: TypedArg {
+                        tipo: typed_via.1,
+                        annotation: Some(annotation),
+                        ..arg
+                    },
+                    via: typed_via.0,
+                }]
+            };
+
+            Ok(Definition::Benchmark(Function {
+                doc: typed_f.doc,
+                location: typed_f.location,
+                name: typed_f.name,
+                public: typed_f.public,
+                arguments,
                 return_annotation: typed_f.return_annotation,
                 return_type: typed_f.return_type,
                 body: typed_f.body,
@@ -690,6 +697,83 @@ fn infer_definition(
 }
 
 #[allow(clippy::result_large_err)]
+fn extract_via_information<F>(
+    f: &Function<(), UntypedExpr, ArgVia<UntypedArg, UntypedExpr>>,
+    arg: &ArgVia<UntypedArg, UntypedExpr>,
+    hydrators: &mut HashMap<String, Hydrator>,
+    environment: &mut Environment<'_>,
+    tracing: Tracing,
+    infer_via: F,
+) -> Result<((TypedExpr, Rc<Type>), Annotation), Error>
+where
+    F: FnOnce(
+        &mut Environment<'_>,
+        Option<Rc<Type>>,
+        &Rc<Type>,
+        &Span,
+    ) -> Result<(Annotation, Rc<Type>), Error>,
+{
+    let typed_via = ExprTyper::new(environment, tracing).infer(arg.via.clone())?;
+
+    let hydrator: &mut Hydrator = hydrators.get_mut(&f.name).unwrap();
+
+    let provided_inner_type = arg
+        .arg
+        .annotation
+        .as_ref()
+        .map(|ann| hydrator.type_from_annotation(ann, environment))
+        .transpose()?;
+
+    let (inferred_annotation, inferred_inner_type) = infer_via(
+        environment,
+        provided_inner_type.clone(),
+        &typed_via.tipo(),
+        &arg.via.location(),
+    )?;
+
+    // Ensure that the annotation, if any, matches the type inferred from the
+    // Fuzzer.
+    if let Some(provided_inner_type) = provided_inner_type {
+        if !arg
+            .arg
+            .annotation
+            .as_ref()
+            .unwrap()
+            .is_logically_equal(&inferred_annotation)
+        {
+            return Err(Error::CouldNotUnify {
+                location: arg.arg.location,
+                expected: inferred_inner_type.clone(),
+                given: provided_inner_type.clone(),
+                situation: Some(UnifyErrorSituation::FuzzerAnnotationMismatch),
+                rigid_type_names: hydrator.rigid_names(),
+            });
+        }
+    }
+
+    // Replace the pre-registered type for the test function, to allow inferring
+    // the function body with the right type arguments.
+    let scope = environment
+        .scope
+        .get_mut(&f.name)
+        .expect("Could not find preregistered type for test");
+    if let Type::Fn {
+        ret,
+        alias,
+        args: _,
+    } = scope.tipo.as_ref()
+    {
+        scope.tipo = Rc::new(Type::Fn {
+            ret: ret.clone(),
+            args: vec![inferred_inner_type.clone()],
+            alias: alias.clone(),
+        })
+    }
+
+    Ok(((typed_via, inferred_inner_type), inferred_annotation))
+}
+
+#[allow(clippy::result_large_err)]
 fn infer_fuzzer(
     environment: &mut Environment<'_>,
     expected_inner_type: Option<Rc<Type>>,
@@ -752,6 +836,54 @@ fn infer_fuzzer(
 
         Type::Var { tipo, alias } => match &*tipo.deref().borrow() {
             TypeVar::Link { tipo } => infer_fuzzer(
+                environment,
+                expected_inner_type,
+                &Type::with_alias(tipo.clone(), alias.clone()),
+                location,
+            ),
+            _ => Err(Error::GenericLeftAtBoundary {
+                location: *location,
+            }),
+        },
+
+        Type::App { .. } | Type::Tuple { .. } | Type::Pair { .. } => Err(could_not_unify()),
+    }
+}
+
+#[allow(clippy::result_large_err)]
+fn infer_sampler(
+    environment: &mut Environment<'_>,
+    expected_inner_type: Option<Rc<Type>>,
+    tipo: &Rc<Type>,
+    location: &Span,
+) -> Result<(Annotation, Rc<Type>), Error> {
+    let could_not_unify = || Error::CouldNotUnify {
+        location: *location,
+        expected: Type::sampler(
+            expected_inner_type
+                .clone()
+                .unwrap_or_else(|| Type::generic_var(0)),
+        ),
+        given: tipo.clone(),
+        situation: None,
+        rigid_type_names: HashMap::new(),
+    };
+
+    match tipo.borrow() {
+        Type::Fn {
+            ret,
+            args,
+            alias: _,
+        } => {
+            if args.len() == 1 && args[0].is_int() {
+                infer_fuzzer(environment, expected_inner_type, ret, &Span::empty())
+            } else {
+                Err(could_not_unify())
+            }
+        }
+
+        Type::Var { tipo, alias } => match &*tipo.deref().borrow() {
+            TypeVar::Link { tipo } => infer_sampler(
                 environment,
                 expected_inner_type,
                 &Type::with_alias(tipo.clone(), alias.clone()),

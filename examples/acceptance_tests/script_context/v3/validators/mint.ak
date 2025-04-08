@@ -83,6 +83,8 @@ fn assert_outputs(
       },
     ) == list.at(outputs, 0)
 
+  trace @"This test validator has a higher hash than the one below. Change and try again."
+
   expect
     Some(
       Output {

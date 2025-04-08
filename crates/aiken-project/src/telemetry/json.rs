@@ -1,4 +1,4 @@
-use super::{group_by_module, Event, EventListener};
+use super::{Event, EventListener, group_by_module};
 use aiken_lang::{
     ast::OnTestFailure,
     expr::UntypedExpr,
@@ -39,6 +39,36 @@ impl EventListener for Json {
                 });
                 println!("{}", serde_json::to_string_pretty(&json_output).unwrap());
             }
+            Event::FinishedBenchmarks { benchmarks, seed } => {
+                let benchmark_results: Vec<_> = benchmarks
+                    .into_iter()
+                    .filter_map(|test| {
+                        if let TestResult::BenchmarkResult(result) = test {
+                            Some(serde_json::json!({
+                                "name": result.bench.name,
+                                "module": result.bench.module,
+                                "measures": result.measures
+                                    .into_iter()
+                                    .map(|measure| serde_json::json!({
+                                        "size": measure.0,
+                                        "memory": measure.1.mem,
+                                        "cpu": measure.1.cpu
+                                    }))
+                                    .collect::<Vec<_>>()
+                            }))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                let json = serde_json::json!({
+                    "benchmarks": benchmark_results,
+                    "seed": seed,
+                });
+
+                println!("{}", serde_json::to_string_pretty(&json).unwrap());
+            }
             _ => super::Terminal.handle_event(event),
         }
     }
@@ -46,10 +76,9 @@ impl EventListener for Json {
 
 fn fmt_test_json(result: &TestResult<UntypedExpr, UntypedExpr>) -> serde_json::Value {
     let on_test_failure = match result {
-        TestResult::UnitTestResult(UnitTestResult { ref test, .. }) => &test.on_test_failure,
-        TestResult::PropertyTestResult(PropertyTestResult { ref test, .. }) => {
-            &test.on_test_failure
-        }
+        TestResult::UnitTestResult(UnitTestResult { test, .. }) => &test.on_test_failure,
+        TestResult::PropertyTestResult(PropertyTestResult { test, .. }) => &test.on_test_failure,
+        TestResult::BenchmarkResult(_) => unreachable!("benchmark returned in JSON output"),
     };
 
     let mut test = json!({
@@ -95,10 +124,11 @@ fn fmt_test_json(result: &TestResult<UntypedExpr, UntypedExpr>) -> serde_json::V
                 Err(err) => json!({"error": err.to_string()}),
             };
         }
+        TestResult::BenchmarkResult(_) => unreachable!("benchmark returned in JSON output"),
     }
 
-    if !result.traces().is_empty() {
-        test["traces"] = json!(result.traces());
+    if !result.logs().is_empty() {
+        test["traces"] = json!(result.logs());
     }
 
     test

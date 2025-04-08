@@ -78,7 +78,7 @@ fn assert_uplc(source_code: &str, expected: Term<Name>, should_fail: bool, verbo
                 pretty_expected,
             );
 
-            let mut eval = debruijn_program.eval(ExBudget::default());
+            let eval = debruijn_program.eval(ExBudget::default());
 
             assert_eq!(
                 eval.failed(false),
@@ -3603,7 +3603,7 @@ fn when_bool_is_true() {
     assert_uplc(
         src,
         Term::var("subject")
-            .delayed_if_then_else(Term::bool(true), Term::Error)
+            .delayed_if_then_else(Term::bool(true), Term::Error.delay().force())
             .lambda("subject")
             .apply(Term::bool(true)),
         false,
@@ -3627,7 +3627,7 @@ fn when_bool_is_true_switched_cases() {
     assert_uplc(
         src,
         Term::var("subject")
-            .delayed_if_then_else(Term::bool(true), Term::Error)
+            .delayed_if_then_else(Term::bool(true), Term::Error.delay().force())
             .lambda("subject")
             .apply(Term::bool(true)),
         false,
@@ -3651,7 +3651,7 @@ fn when_bool_is_false() {
     assert_uplc(
         src,
         Term::var("subject")
-            .delayed_if_then_else(Term::bool(true), Term::Error)
+            .delayed_if_then_else(Term::bool(true), Term::Error.delay().force())
             .lambda("subject")
             .apply(Term::bool(false)),
         true,
@@ -4088,16 +4088,16 @@ fn generic_validator_type_test() {
                         Term::tail_list()
                             .apply(Term::Var(tail_id_5.clone()))
                             .as_var("tail_id_6", |tail_id_6| {
-                                Term::head_list()
+                                Term::tail_list()
                                     .apply(Term::Var(tail_id_6.clone()))
-                                    .as_var("__val", |val| {
-                                        Term::tail_list()
+                                    .delayed_choose_list(
+                                        Term::head_list()
                                             .apply(Term::Var(tail_id_6))
-                                            .delayed_choose_list(
-                                                expect_b(val, Term::Var(then_delayed), trace),
-                                                Term::Error,
-                                            )
-                                    })
+                                            .as_var("__val", |val| {
+                                                expect_b(val, Term::Var(then_delayed), trace)
+                                            }),
+                                        Term::Error,
+                                    )
                             })
                     }
                 });

@@ -2,25 +2,24 @@ pub(crate) use crate::{
     ast::{
         self, Annotation, ArgBy, ArgName, AssignmentKind, AssignmentPattern, BinOp, Bls12_381Point,
         ByteArrayFormatPreference, CallArg, Curve, DataType, DataTypeKey, DefinitionLocation,
-        Located, LogicalOpChainKind, ParsedCallArg, Pattern, RecordConstructorArg,
-        RecordUpdateSpread, Span, TraceKind, TypedArg, TypedAssignmentKind, TypedClause,
-        TypedDataType, TypedIfBranch, TypedPattern, TypedRecordUpdateArg, UnOp, UntypedArg,
-        UntypedAssignmentKind, UntypedClause, UntypedIfBranch, UntypedRecordUpdateArg,
+        Located, LogicalOpChainKind, ParsedCallArg, RecordConstructorArg, RecordUpdateSpread, Span,
+        TraceKind, TypedArg, TypedAssignmentKind, TypedClause, TypedDataType, TypedIfBranch,
+        TypedPattern, TypedRecordUpdateArg, UnOp, UntypedArg, UntypedAssignmentKind, UntypedClause,
+        UntypedIfBranch, UntypedRecordUpdateArg,
     },
     parser::token::Base,
     tipo::{
+        ModuleValueConstructor, Type, TypeVar, ValueConstructor, ValueConstructorVariant,
         check_replaceable_opaque_type, convert_opaque_type, lookup_data_type_by_tipo,
-        ModuleValueConstructor, PatternConstructor, Type, TypeVar, ValueConstructor,
-        ValueConstructorVariant,
     },
 };
 use indexmap::IndexMap;
 use pallas_primitives::alonzo::{Constr, PlutusData};
 use std::{fmt::Debug, rc::Rc};
 use uplc::{
+    KeyValuePairs,
     ast::Data,
     machine::{runtime::convert_tag_to_constr, value::from_pallas_bigint},
-    KeyValuePairs,
 };
 use vec1::Vec1;
 
@@ -109,7 +108,7 @@ pub enum TypedExpr {
         location: Span,
         tipo: Rc<Type>,
         value: Box<Self>,
-        pattern: Pattern<PatternConstructor, Rc<Type>>,
+        pattern: TypedPattern,
         kind: TypedAssignmentKind,
     },
 
@@ -650,7 +649,7 @@ pub enum UntypedExpr {
 
     ByteArray {
         location: Span,
-        bytes: Vec<u8>,
+        bytes: Vec<(u8, Span)>,
         preferred_format: ByteArrayFormatPreference,
     },
 
@@ -761,6 +760,10 @@ impl UntypedExpr {
         tipo: &Type,
     ) -> Result<Self, String> {
         UntypedExpr::do_reify_constant(&mut IndexMap::new(), data_types, cst, tipo)
+    }
+
+    pub fn is_discard(&self) -> bool {
+        matches!(self, UntypedExpr::Var { name, ..} if name.starts_with("_"))
     }
 
     // Reify some opaque 'PlutusData' into an 'UntypedExpr', using a Type annotation. We also need
@@ -974,7 +977,7 @@ impl UntypedExpr {
                             location: Span::empty(),
                             value: UntypedExpr::ByteArray {
                                 location: Span::empty(),
-                                bytes,
+                                bytes: bytes.into_iter().map(|b| (b, Span::empty())).collect(),
                                 preferred_format: ByteArrayFormatPreference::HexadecimalString,
                             },
                         }],
@@ -998,11 +1001,15 @@ impl UntypedExpr {
                 value: from_pallas_bigint(i).to_string(),
             },
 
-            PlutusData::BoundedBytes(bytes) => UntypedExpr::ByteArray {
-                location: Span::empty(),
-                bytes: bytes.into(),
-                preferred_format: ByteArrayFormatPreference::HexadecimalString,
-            },
+            PlutusData::BoundedBytes(bytes) => {
+                let bytes: Vec<u8> = bytes.into();
+
+                UntypedExpr::ByteArray {
+                    location: Span::empty(),
+                    bytes: bytes.into_iter().map(|b| (b, Span::empty())).collect(),
+                    preferred_format: ByteArrayFormatPreference::HexadecimalString,
+                }
+            }
 
             PlutusData::Array(elems) => UntypedExpr::List {
                 location: Span::empty(),
@@ -1110,9 +1117,10 @@ impl UntypedExpr {
                             value: String::from_utf8(bytes.to_vec()).expect("invalid UTF-8 string"),
                         })
                     } else {
+                        let bytes: Vec<u8> = bytes.into();
                         Ok(UntypedExpr::ByteArray {
                             location: Span::empty(),
-                            bytes: bytes.into(),
+                            bytes: bytes.into_iter().map(|b| (b, Span::empty())).collect(),
                             preferred_format: ByteArrayFormatPreference::HexadecimalString,
                         })
                     }
@@ -1216,31 +1224,23 @@ impl UntypedExpr {
                                     name: constructor.name.to_string(),
                                 })
                             } else {
-                                let arguments =
-                                    fields
-                                        .to_vec()
-                                        .into_iter()
-                                        .zip(constructor.arguments.iter())
-                                        .map(
-                                            |(
-                                                field,
-                                                RecordConstructorArg {
-                                                    ref label,
-                                                    ref tipo,
-                                                    ..
-                                                },
-                                            )| {
-                                                UntypedExpr::do_reify_data(
-                                                    generics, data_types, field, tipo,
-                                                )
-                                                .map(|value| CallArg {
-                                                    label: label.clone(),
-                                                    location: Span::empty(),
-                                                    value,
-                                                })
-                                            },
+                                let arguments = fields
+                                    .to_vec()
+                                    .into_iter()
+                                    .zip(constructor.arguments.iter())
+                                    .map(|(field, RecordConstructorArg { label, tipo, .. })| {
+                                        UntypedExpr::do_reify_data(
+                                            generics, data_types, field, tipo,
                                         )
-                                        .collect::<Result<Vec<_>, _>>()?;
+                                        .map(|value| {
+                                            CallArg {
+                                                label: label.clone(),
+                                                location: Span::empty(),
+                                                value,
+                                            }
+                                        })
+                                    })
+                                    .collect::<Result<Vec<_>, _>>()?;
 
                                 Ok(UntypedExpr::Call {
                                     location: Span::empty(),
@@ -1336,17 +1336,24 @@ impl UntypedExpr {
                     value: Some(value),
                     label,
                     location,
-                } => CallArg {
+                } if !value.is_discard() => CallArg {
                     value,
                     label,
                     location,
                 },
                 CallArg {
-                    value: None,
+                    value,
                     label,
                     location,
                 } => {
-                    let name = format!("{}__{index}", ast::CAPTURE_VARIABLE);
+                    let name = format!(
+                        "{}__{index}_{}",
+                        ast::CAPTURE_VARIABLE,
+                        match value {
+                            Some(UntypedExpr::Var { ref name, .. }) => name,
+                            _ => "_",
+                        }
+                    );
 
                     holes.push(ast::UntypedArg {
                         location: Span::empty(),
@@ -1354,7 +1361,7 @@ impl UntypedExpr {
                         doc: None,
                         by: ArgBy::ByName(ast::ArgName::Named {
                             label: name.clone(),
-                            name,
+                            name: name.clone(),
                             location: Span::empty(),
                         }),
                         is_validator_param: false,
@@ -1363,10 +1370,7 @@ impl UntypedExpr {
                     ast::CallArg {
                         label,
                         location,
-                        value: UntypedExpr::Var {
-                            location,
-                            name: format!("{}__{index}", ast::CAPTURE_VARIABLE),
-                        },
+                        value: UntypedExpr::Var { location, name },
                     }
                 }
             })
@@ -1398,23 +1402,10 @@ impl UntypedExpr {
         };
 
         match (self.clone(), next.clone()) {
-            (
-                Self::Sequence {
-                    expressions: mut current_expressions,
-                    ..
-                },
-                Self::Sequence {
-                    expressions: mut next_expressions,
-                    ..
-                },
-            ) => {
-                current_expressions.append(&mut next_expressions);
-
-                Self::Sequence {
-                    location,
-                    expressions: current_expressions,
-                }
-            }
+            (left @ Self::Sequence { .. }, right @ Self::Sequence { .. }) => Self::Sequence {
+                location,
+                expressions: vec![left, right],
+            },
             (
                 _,
                 Self::Sequence {

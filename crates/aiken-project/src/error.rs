@@ -3,7 +3,7 @@ use aiken_lang::{
     ast::{self, Span},
     error::ExtraData,
     parser::error::ParseError,
-    test_framework::{PropertyTestResult, TestResult, UnitTestResult},
+    test_framework::{BenchmarkResult, PropertyTestResult, TestResult, UnitTestResult},
     tipo,
 };
 use miette::{
@@ -15,11 +15,30 @@ use owo_colors::{
     Stream::{Stderr, Stdout},
 };
 use std::{
-    fmt::{Debug, Display},
+    collections::BTreeSet,
+    fmt::{self, Debug, Display},
     io,
     path::{Path, PathBuf},
 };
 use zip::result::ZipError;
+
+pub enum TomlLoadingContext {
+    Project,
+    Manifest,
+    Package,
+    Workspace,
+}
+
+impl fmt::Display for TomlLoadingContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TomlLoadingContext::Project => write!(f, "project"),
+            TomlLoadingContext::Manifest => write!(f, "manifest"),
+            TomlLoadingContext::Package => write!(f, "package"),
+            TomlLoadingContext::Workspace => write!(f, "workspace"),
+        }
+    }
+}
 
 #[allow(dead_code)]
 #[derive(thiserror::Error)]
@@ -58,8 +77,9 @@ pub enum Error {
     #[error(transparent)]
     Module(#[from] ast::Error),
 
-    #[error("{help}")]
+    #[error("I could not load the {ctx} config file.")]
     TomlLoading {
+        ctx: TomlLoadingContext,
         path: PathBuf,
         src: String,
         named: Box<NamedSource<String>>,
@@ -120,10 +140,14 @@ pub enum Error {
     },
 
     #[error("I didn't find any validator matching your criteria.")]
-    NoValidatorNotFound { known_validators: Vec<String> },
+    NoValidatorNotFound {
+        known_validators: BTreeSet<(String, String, bool)>,
+    },
 
     #[error("I found multiple suitable validators and I need you to tell me which one to pick.")]
-    MoreThanOneValidatorFound { known_validators: Vec<String> },
+    MoreThanOneValidatorFound {
+        known_validators: BTreeSet<(String, String, bool)>,
+    },
 
     #[error("I couldn't find any exportable function named '{name}' in module '{module}'.")]
     ExportNotFound { module: String, name: String },
@@ -175,6 +199,11 @@ impl Error {
                 test.name.to_string(),
                 test.input_path.to_path_buf(),
                 test.program.to_pretty(),
+            ),
+            TestResult::BenchmarkResult(BenchmarkResult { bench, .. }) => (
+                bench.name.to_string(),
+                bench.input_path.to_path_buf(),
+                bench.program.to_pretty(),
             ),
         };
 
@@ -372,7 +401,7 @@ impl Diagnostic for Error {
             Error::NoDefaultEnvironment { .. } => Some(Box::new(
                 "Environment module names are free, but there must be at least one named 'default.ak'.",
             )),
-            Error::TomlLoading { .. } => None,
+            Error::TomlLoading { help, .. } => Some(Box::new(help)),
             Error::Format { .. } => None,
             Error::TestFailure { .. } => None,
             Error::Http(_) => None,
@@ -401,28 +430,16 @@ impl Diagnostic for Error {
                     None => String::new(),
                 }
             ))),
-            Error::NoValidatorNotFound { known_validators } => Some(Box::new(format!(
-                "Here's a list of all validators I've found in your project. Please double-check this list against the options that you've provided:\n\n{}",
-                known_validators
-                    .iter()
-                    .map(|title| format!(
-                        "→ {title}",
-                        title = title.if_supports_color(Stdout, |s| s.purple())
-                    ))
-                    .collect::<Vec<String>>()
-                    .join("\n")
+            Error::NoValidatorNotFound { known_validators } => Some(Box::new(hint_validators(
+                known_validators,
+                "Here's a list of all validators I've found in your project.\nPlease double-check this list against the options that you've provided.",
             ))),
-            Error::MoreThanOneValidatorFound { known_validators } => Some(Box::new(format!(
-                "Here's a list of all validators I've found in your project. Select one of them using the appropriate options:\n\n{}",
-                known_validators
-                    .iter()
-                    .map(|title| format!(
-                        "→ {title}",
-                        title = title.if_supports_color(Stdout, |s| s.purple())
-                    ))
-                    .collect::<Vec<String>>()
-                    .join("\n")
-            ))),
+            Error::MoreThanOneValidatorFound { known_validators } => {
+                Some(Box::new(hint_validators(
+                    known_validators,
+                    "Here's a list of matching validators I've found in your project.\nPlease narrow the selection using additional options.",
+                )))
+            }
             Error::Module(e) => e.help(),
         }
     }
@@ -572,6 +589,8 @@ pub enum Warning {
     CompilerVersionMismatch { demanded: String, current: String },
     #[error("No configuration found for environment {env}.")]
     NoConfigurationForEnv { env: String },
+    #[error("Suspicious test filter (-m) yielding no test scenarios.")]
+    SuspiciousTestMatch { test: String },
 }
 
 impl ExtraData for Warning {
@@ -581,7 +600,8 @@ impl ExtraData for Warning {
             | Warning::DependencyAlreadyExists { .. }
             | Warning::InvalidModuleName { .. }
             | Warning::CompilerVersionMismatch { .. }
-            | Warning::NoConfigurationForEnv { .. } => None,
+            | Warning::NoConfigurationForEnv { .. }
+            | Warning::SuspiciousTestMatch { .. } => None,
             Warning::Type { warning, .. } => warning.extra_data(),
         }
     }
@@ -594,7 +614,8 @@ impl GetSource for Warning {
             Warning::NoValidators
             | Warning::DependencyAlreadyExists { .. }
             | Warning::NoConfigurationForEnv { .. }
-            | Warning::CompilerVersionMismatch { .. } => None,
+            | Warning::CompilerVersionMismatch { .. }
+            | Warning::SuspiciousTestMatch { .. } => None,
         }
     }
 
@@ -605,7 +626,8 @@ impl GetSource for Warning {
             | Warning::InvalidModuleName { .. }
             | Warning::DependencyAlreadyExists { .. }
             | Warning::NoConfigurationForEnv { .. }
-            | Warning::CompilerVersionMismatch { .. } => None,
+            | Warning::CompilerVersionMismatch { .. }
+            | Warning::SuspiciousTestMatch { .. } => None,
         }
     }
 }
@@ -622,7 +644,8 @@ impl Diagnostic for Warning {
             | Warning::InvalidModuleName { .. }
             | Warning::NoConfigurationForEnv { .. }
             | Warning::DependencyAlreadyExists { .. }
-            | Warning::CompilerVersionMismatch { .. } => None,
+            | Warning::CompilerVersionMismatch { .. }
+            | Warning::SuspiciousTestMatch { .. } => None,
         }
     }
 
@@ -633,7 +656,8 @@ impl Diagnostic for Warning {
             | Warning::NoValidators
             | Warning::DependencyAlreadyExists { .. }
             | Warning::NoConfigurationForEnv { .. }
-            | Warning::CompilerVersionMismatch { .. } => None,
+            | Warning::CompilerVersionMismatch { .. }
+            | Warning::SuspiciousTestMatch { .. } => None,
         }
     }
 
@@ -654,6 +678,7 @@ impl Diagnostic for Warning {
             Warning::NoConfigurationForEnv { .. } => {
                 Some(Box::new("aiken::project::config::missing::env"))
             }
+            Warning::SuspiciousTestMatch { .. } => Some(Box::new("aiken::check::suspicious_match")),
         }
     }
 
@@ -674,6 +699,10 @@ impl Diagnostic for Warning {
             Warning::NoConfigurationForEnv { .. } => Some(Box::new(
                 "When configuration keys are missing for a target environment, no 'config' module will be created. This may lead to issues down the line.",
             )),
+            Warning::SuspiciousTestMatch { test } => Some(Box::new(format!(
+                "Did you mean to match all tests within a specific module? Like so:\n\n╰─▶ {}",
+                format!("-m \"{test}.{{..}}\"").if_supports_color(Stderr, |s| s.bold()),
+            ))),
         }
     }
 }
@@ -695,7 +724,7 @@ impl Warning {
 
 impl Debug for Warning {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        default_miette_handler(0)
+        default_miette_handler(1)
             .debug(
                 &DisplayWarning {
                     title: &self.to_string(),
@@ -720,7 +749,7 @@ struct DisplayWarning<'a> {
     help: Option<String>,
 }
 
-impl<'a> Diagnostic for DisplayWarning<'a> {
+impl Diagnostic for DisplayWarning<'_> {
     fn severity(&self) -> Option<miette::Severity> {
         Some(miette::Severity::Warning)
     }
@@ -749,7 +778,7 @@ impl<'a> Diagnostic for DisplayWarning<'a> {
     }
 }
 
-impl<'a> Debug for DisplayWarning<'a> {
+impl Debug for DisplayWarning<'_> {
     fn fmt(&self, _f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         unreachable!("Display warning are never shown directly.");
     }
@@ -772,4 +801,50 @@ fn default_miette_handler(context_lines: usize) -> MietteHandler {
         .terminal_links(true)
         .context_lines(context_lines)
         .build()
+}
+
+fn hint_validators(known_validators: &BTreeSet<(String, String, bool)>, hint: &str) -> String {
+    let (pad_module, pad_validator) = known_validators.iter().fold(
+        (9, 12),
+        |(module_len, validator_len), (module, validator, _)| {
+            (
+                module_len.max(module.len()),
+                validator_len.max(validator.len()),
+            )
+        },
+    );
+
+    format!(
+        "{hint}\n\n\
+         {:<pad_module$}   {:<pad_validator$}\n\
+         {:─<pad_module$}┒ ┎{:─<pad_validator$}\n\
+         {}\n\nFor convenience, I have highlighted in {bold_green} suitable candidates that {has_params}.",
+        "module(s)",
+        "validator(s)",
+        "─",
+        "─",
+        {
+            known_validators
+                .iter()
+                .map(|(module, validator, has_params)| {
+                    let title = format!("{:>pad_module$} . {:<pad_validator$}", module, validator,);
+                    if *has_params {
+                        title
+                            .if_supports_color(Stderr, |s| s.bold())
+                            .if_supports_color(Stderr, |s| s.green())
+                            .to_string()
+                    } else {
+                        title
+                    }
+                })
+                .collect::<Vec<String>>()
+                .join("\n")
+        },
+        bold_green = "bold green"
+            .if_supports_color(Stderr, |s| s.bold())
+            .if_supports_color(Stderr, |s| s.green()),
+        has_params = "can take parameters"
+            .if_supports_color(Stderr, |s| s.bold())
+            .if_supports_color(Stderr, |s| s.green()),
+    )
 }

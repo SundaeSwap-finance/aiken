@@ -9,7 +9,7 @@ use super::{
 use crate::{
     expr::UntypedExpr,
     parser::{
-        chain::{call::parser as call, field_access, tuple_index::parser as tuple_index, Chain},
+        chain::{Chain, call::parser as call, field_access, tuple_index::parser as tuple_index},
         error::ParseError,
         token::Token,
     },
@@ -53,7 +53,6 @@ pub fn chain_start<'a>(
         pair(expression.clone()),
         record_update(expression.clone()),
         record(expression.clone()),
-        field_access::constructor(),
         and_or_chain(expression.clone()),
         var(),
         tuple(expression.clone()),

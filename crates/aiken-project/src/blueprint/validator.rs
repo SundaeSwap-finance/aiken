@@ -7,18 +7,18 @@ use super::{
 };
 use crate::module::{CheckedModule, CheckedModules};
 use aiken_lang::{
-    ast::{well_known, Annotation, TypedArg, TypedFunction, TypedValidator},
+    ast::{Annotation, TypedArg, TypedFunction, TypedValidator, well_known},
     gen_uplc::CodeGenerator,
     plutus_version::PlutusVersion,
     source_map::SourceMap,
-    tipo::{collapse_links, Type},
+    tipo::{Type, collapse_links},
 };
 use miette::NamedSource;
 use serde;
 use std::borrow::Borrow;
 use uplc::{
-    ast::{Constant, SerializableProgram},
     PlutusData,
+    ast::{Constant, SerializableProgram},
 };
 
 #[derive(Debug, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
@@ -50,6 +50,20 @@ pub struct Validator {
 }
 
 impl Validator {
+    pub fn get_module_and_name(&self) -> (&str, &str) {
+        let mut split = self.title.split('.');
+
+        let known_module_name = split
+            .next()
+            .expect("validator's name must have two dot-separated components.");
+
+        let known_validator_name = split
+            .next()
+            .expect("validator's name must have two dot-separated components.");
+
+        (known_module_name, known_validator_name)
+    }
+
     pub fn from_checked_module(
         modules: &CheckedModules,
         generator: &mut CodeGenerator,
@@ -126,7 +140,7 @@ impl Validator {
                     ),
                 })
             })
-            .collect::<Result<_, _>>()?;
+            .collect::<Result<Vec<_>, _>>()?;
 
         let (datum, redeemer) = if func.name == well_known::VALIDATOR_ELSE {
             (None, None)
@@ -207,6 +221,16 @@ impl Validator {
             schema: Declaration::Inline(Box::new(Schema::Data(Data::Opaque))),
         }));
 
+        definitions
+            .prune_orphan_pairs(
+                parameters
+                    .iter()
+                    .chain(redeemer.as_ref().map(|x| vec![x]).unwrap_or_default())
+                    .chain(datum.as_ref().map(|x| vec![x]).unwrap_or_default())
+                    .collect::<Vec<&Parameter>>(),
+            )
+            .replace_pairs_with_data_lists();
+
         Ok(Validator {
             title: format!("{}.{}.{}", &module.name, &def.name, &func.name,),
             description: func.doc.clone(),
@@ -227,8 +251,8 @@ impl Validator {
 pub fn tipo_or_annotation<'a>(module: &'a CheckedModule, arg: &'a TypedArg) -> &'a Type {
     match collapse_links(arg.tipo.clone()).borrow() {
         Type::App {
-            module: ref module_name,
-            name: ref type_name,
+            module: module_name,
+            name: type_name,
             ..
         } if module_name.is_empty() && &type_name[..] == "Data" => match arg.annotation {
             Some(Annotation::Constructor { ref arguments, .. }) if !arguments.is_empty() => module
@@ -283,7 +307,7 @@ impl Validator {
                         description: None,
                         annotated: schema.as_ref().clone(),
                     },
-                    Declaration::Referenced(ref link) => definitions
+                    Declaration::Referenced(link) => definitions
                         .lookup(link)
                         .map(|s| {
                             Ok(Annotated {
@@ -743,6 +767,83 @@ mod tests {
     }
 
     #[test]
+    fn pair_used_after_map() {
+        assert_validator!(
+            r#"
+            pub type MyPair =
+              Pair<Int, Int>
+
+            pub type MyDatum {
+              pairs: List<MyPair>,
+              pair: MyPair,
+            }
+
+            validator placeholder {
+              spend(_datum: Option<MyDatum>, _redeemer: Void, _utxo: Data, _self: Data,) {
+                True
+              }
+            }
+            "#
+        );
+    }
+
+    #[test]
+    fn pair_used_before_map() {
+        assert_validator!(
+            r#"
+            pub type MyPair =
+              Pair<Int, Int>
+
+            pub type MyDatum {
+              pair: MyPair,
+              pairs: List<MyPair>,
+            }
+
+            validator placeholder {
+              spend(_datum: Option<MyDatum>, _redeemer: Void, _utxo: Data, _self: Data,) {
+                True
+              }
+            }
+            "#
+        );
+    }
+
+    #[test]
+    fn map_in_map() {
+        assert_validator!(
+            r#"
+            pub type OuterMap =
+                List<Pair<Int, InnerMap>>
+
+            pub type InnerMap =
+                List<Pair<Int, Bool>>
+
+            validator placeholder {
+              spend(_datum: Option<Void>, _redeemer: OuterMap, _utxo: Data, _self: Data,) {
+                True
+              }
+            }
+            "#
+        );
+    }
+
+    #[test]
+    fn pair_of_lists() {
+        assert_validator!(
+            r#"
+            pub type MyPair =
+              Pair<List<Int>, Bool>
+
+            validator placeholder {
+              spend(_datum: Option<Data>, _redeemer: MyPair, _utxo: Data, _self: Data,) {
+                True
+              }
+            }
+            "#
+        );
+    }
+
+    #[test]
     fn else_redeemer() {
         assert_validator!(
             r#"
@@ -937,11 +1038,13 @@ mod tests {
         let mut definitions = fixture_definitions();
         definitions.insert(
             &schema,
-            Schema::Data(Data::AnyOf(vec![Constructor {
-                index: 0,
-                fields: vec![Declaration::Referenced(Reference::new("Bool")).into()],
-            }
-            .into()]))
+            Schema::Data(Data::AnyOf(vec![
+                Constructor {
+                    index: 0,
+                    fields: vec![Declaration::Referenced(Reference::new("Bool")).into()],
+                }
+                .into(),
+            ]))
             .into(),
         );
 

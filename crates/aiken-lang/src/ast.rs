@@ -17,7 +17,7 @@ use std::{
     rc::Rc,
 };
 use uplc::machine::runtime::Compressable;
-use vec1::{vec1, Vec1};
+use vec1::{Vec1, vec1};
 
 pub const BACKPASS_VARIABLE: &str = "_backpass";
 pub const CAPTURE_VARIABLE: &str = "_capture";
@@ -118,6 +118,7 @@ impl TypedModule {
             Definition::Use(_) => false,
             Definition::Test(_) => false,
             Definition::Validator(_) => false,
+            Definition::Benchmark(_) => false,
         })
     }
 
@@ -134,6 +135,7 @@ impl TypedModule {
             Definition::Use(_) => false,
             Definition::Test(_) => false,
             Definition::Validator(_) => false,
+            Definition::Benchmark(_) => false,
         })
     }
 
@@ -183,6 +185,16 @@ impl TypedModule {
                             function_name: test.name.clone(),
                         },
                         test.clone().into(),
+                    );
+                }
+
+                Definition::Benchmark(benchmark) => {
+                    functions.insert(
+                        FunctionAccessKey {
+                            module_name: self.name.clone(),
+                            function_name: benchmark.name.clone(),
+                        },
+                        benchmark.clone().into(),
                     );
                 }
 
@@ -246,6 +258,7 @@ fn str_to_keyword(word: &str) -> Option<Token> {
         "or" => Some(Token::Or),
         "validator" => Some(Token::Validator),
         "via" => Some(Token::Via),
+        "bench" => Some(Token::Benchmark),
         _ => None,
     }
 }
@@ -567,7 +580,7 @@ impl TypedValidator {
         let var_purpose_arg = "__purpose_arg__";
         let var_datum = "__datum__";
 
-        TypedExpr::sequence(&[
+        let context_handler = TypedExpr::sequence(&[
             TypedExpr::let_(
                 TypedExpr::local_var(var_context, Type::script_context(), self.location),
                 TypedPattern::Constructor {
@@ -746,7 +759,29 @@ impl TypedValidator {
                     }))
                     .collect(),
             },
-        ])
+        ]);
+
+        if self.handlers.is_empty() {
+            let fallback = &self.fallback;
+            let arg = fallback.arguments.first().unwrap();
+
+            let then = match arg.get_variable_name() {
+                Some(arg_name) => TypedExpr::sequence(&[
+                    TypedExpr::let_(
+                        TypedExpr::local_var(var_context, arg.tipo.clone(), arg.location),
+                        TypedPattern::var(arg_name),
+                        arg.tipo.clone(),
+                        arg.location,
+                    ),
+                    fallback.body.clone(),
+                ]),
+                None => fallback.body.clone(),
+            };
+
+            then
+        } else {
+            context_handler
+        }
     }
 
     pub fn find_node(&self, byte_index: usize) -> Option<Located<'_>> {
@@ -810,6 +845,8 @@ pub enum Definition<T, Arg, Expr, PackageName> {
 
     Test(Function<T, Expr, ArgVia<Arg, Expr>>),
 
+    Benchmark(Function<T, Expr, ArgVia<Arg, Expr>>),
+
     Validator(Validator<T, Arg, Expr>),
 }
 
@@ -822,6 +859,7 @@ impl<A, B, C, D> Definition<A, B, C, D> {
             | Definition::DataType(DataType { location, .. })
             | Definition::ModuleConstant(ModuleConstant { location, .. })
             | Definition::Validator(Validator { location, .. })
+            | Definition::Benchmark(Function { location, .. })
             | Definition::Test(Function { location, .. }) => *location,
         }
     }
@@ -834,6 +872,7 @@ impl<A, B, C, D> Definition<A, B, C, D> {
             | Definition::DataType(DataType { doc, .. })
             | Definition::ModuleConstant(ModuleConstant { doc, .. })
             | Definition::Validator(Validator { doc, .. })
+            | Definition::Benchmark(Function { doc, .. })
             | Definition::Test(Function { doc, .. }) => {
                 let _ = std::mem::replace(doc, Some(new_doc));
             }
@@ -848,6 +887,7 @@ impl<A, B, C, D> Definition<A, B, C, D> {
             | Definition::DataType(DataType { doc, .. })
             | Definition::ModuleConstant(ModuleConstant { doc, .. })
             | Definition::Validator(Validator { doc, .. })
+            | Definition::Benchmark(Function { doc, .. })
             | Definition::Test(Function { doc, .. }) => doc.clone(),
         }
     }
@@ -881,7 +921,7 @@ pub enum Located<'a> {
     Annotation(&'a Annotation),
 }
 
-impl<'a> Located<'a> {
+impl Located<'_> {
     pub fn definition_location(&self) -> Option<DefinitionLocation<'_>> {
         match self {
             Self::Expression(expression) => expression.definition_location(),
@@ -916,7 +956,7 @@ pub struct CallArg<A> {
 impl CallArg<UntypedExpr> {
     pub fn is_capture_hole(&self) -> bool {
         match &self.value {
-            UntypedExpr::Var { ref name, .. } => name.contains(CAPTURE_VARIABLE),
+            UntypedExpr::Var { name, .. } => name.contains(CAPTURE_VARIABLE),
             _ => false,
         }
     }
@@ -1105,19 +1145,6 @@ impl TypedArg {
 
     pub fn get_name(&self) -> String {
         self.arg_name.get_name()
-    }
-
-    pub fn is_capture(&self) -> bool {
-        if let ArgName::Named {
-            ref name, location, ..
-        } = self.arg_name
-        {
-            return name.starts_with(CAPTURE_VARIABLE)
-                && location == Span::empty()
-                && self.location == Span::empty();
-        }
-
-        false
     }
 
     pub fn find_node(&self, byte_index: usize) -> Option<Located<'_>> {
@@ -1508,8 +1535,8 @@ impl BinOp {
     }
 }
 
-pub type UntypedPattern = Pattern<(), ()>;
-pub type TypedPattern = Pattern<PatternConstructor, Rc<Type>>;
+pub type UntypedPattern = Pattern<(), (), Namespace, (u8, Span)>;
+pub type TypedPattern = Pattern<PatternConstructor, Rc<Type>, String, u8>;
 
 impl TypedPattern {
     pub fn var(name: &str) -> Self {
@@ -1627,7 +1654,13 @@ impl TypedPattern {
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub enum Pattern<Constructor, Type> {
+pub enum Namespace {
+    Module(String),
+    Type(Option<String>, String),
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum Pattern<Constructor, Type, NamespaceKind, ByteValue> {
     Int {
         location: Span,
         value: String,
@@ -1636,7 +1669,7 @@ pub enum Pattern<Constructor, Type> {
 
     ByteArray {
         location: Span,
-        value: Vec<u8>,
+        value: Vec<ByteValue>,
         preferred_format: ByteArrayFormatPreference,
     },
 
@@ -1680,7 +1713,7 @@ pub enum Pattern<Constructor, Type> {
         location: Span,
         name: String,
         arguments: Vec<CallArg<Self>>,
-        module: Option<String>,
+        module: Option<NamespaceKind>,
         constructor: Constructor,
         spread_location: Option<Span>,
         tipo: Type,
@@ -1698,7 +1731,7 @@ pub enum Pattern<Constructor, Type> {
     },
 }
 
-impl<A, B> Pattern<A, B> {
+impl<A, B, C, BV> Pattern<A, B, C, BV> {
     pub fn location(&self) -> Span {
         match self {
             Pattern::Assign { pattern, .. } => pattern.location(),
@@ -1996,7 +2029,7 @@ impl<'de> serde::Deserialize<'de> for Bls12_381Point {
             {
                 struct FieldVisitor;
 
-                impl<'de> serde::de::Visitor<'de> for FieldVisitor {
+                impl serde::de::Visitor<'_> for FieldVisitor {
                     type Value = Field;
 
                     fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
@@ -2174,22 +2207,23 @@ impl<T: Default> AssignmentKind<T> {
     }
 }
 
-pub type MultiPattern<PatternConstructor, Type> = Vec<Pattern<PatternConstructor, Type>>;
+pub type MultiPattern<PatternConstructor, Type, NamespaceKind, ByteValue> =
+    Vec<Pattern<PatternConstructor, Type, NamespaceKind, ByteValue>>;
 
-pub type UntypedMultiPattern = MultiPattern<(), ()>;
-pub type TypedMultiPattern = MultiPattern<PatternConstructor, Rc<Type>>;
+pub type UntypedMultiPattern = MultiPattern<(), (), Namespace, (u8, Span)>;
+pub type TypedMultiPattern = MultiPattern<PatternConstructor, Rc<Type>, String, u8>;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct UntypedClause {
     pub location: Span,
-    pub patterns: Vec1<Pattern<(), ()>>,
+    pub patterns: Vec1<UntypedPattern>,
     pub then: UntypedExpr,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TypedClause {
     pub location: Span,
-    pub pattern: Pattern<PatternConstructor, Rc<Type>>,
+    pub pattern: TypedPattern,
     pub then: TypedExpr,
 }
 

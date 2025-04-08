@@ -1,6 +1,6 @@
 use crate::{cmd::Cmd as MainCmd, pretty};
 use clap::{Command, Subcommand};
-use clap_complete::{generate, Shell};
+use clap_complete::{Shell, generate};
 use std::{
     fmt::{self, Display},
     fs::{File, OpenOptions},
@@ -191,7 +191,7 @@ enum Log<'a> {
     Done(&'a Shell),
 }
 
-impl<'a> Display for Log<'a> {
+impl Display for Log<'_> {
     fn fmt(&self, f: &mut fmt::Formatter) -> std::result::Result<(), fmt::Error> {
         match self {
             Log::Detecting(what) => pretty::fmt_step(f, "Detecting", what),

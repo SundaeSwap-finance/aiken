@@ -1,24 +1,39 @@
 use crate::{
-    aiken_fn,
+    IdGenerator, aiken_fn,
     ast::{
-        well_known, Annotation, ArgName, CallArg, DataType, DataTypeKey, Function,
-        FunctionAccessKey, ModuleKind, OnTestFailure, RecordConstructor, RecordConstructorArg,
-        Span, TypedArg, TypedDataType, TypedFunction, UnOp,
+        Annotation, ArgName, CallArg, DataType, DataTypeKey, Function, FunctionAccessKey,
+        ModuleKind, OnTestFailure, RecordConstructor, RecordConstructorArg, Span, TypedArg,
+        TypedDataType, TypedFunction, UnOp, well_known,
     },
     expr::TypedExpr,
     tipo::{
-        fields::FieldMap, Type, TypeConstructor, TypeInfo, ValueConstructor,
-        ValueConstructorVariant,
+        Type, TypeConstructor, TypeInfo, ValueConstructor, ValueConstructorVariant,
+        fields::FieldMap,
     },
-    IdGenerator,
 };
+use std::{collections::BTreeSet, sync::LazyLock};
+
 use indexmap::IndexMap;
 use std::{collections::HashMap, rc::Rc};
 use strum::IntoEnumIterator;
-use uplc::builtins::DefaultFunction;
+
+use uplc::{
+    builder::{CONSTR_FIELDS_EXPOSER, CONSTR_INDEX_EXPOSER},
+    builtins::DefaultFunction,
+};
 
 pub const PRELUDE: &str = "aiken";
 pub const BUILTIN: &str = "aiken/builtin";
+
+pub static INTERNAL_FUNCTIONS: LazyLock<BTreeSet<&'static str>> = LazyLock::new(|| {
+    let mut set = BTreeSet::new();
+    set.insert("diagnostic");
+    set.insert("do_from_int");
+    set.insert("encode_base16");
+    set.insert("enumerate");
+    set.insert("from_int");
+    set
+});
 
 /// Build a prelude that can be injected
 /// into a compiler pipeline
@@ -478,13 +493,29 @@ pub fn prelude(id_gen: &IdGenerator) -> TypeInfo {
     //
     // pub type Fuzzer<a> =
     //   fn(PRNG) -> Option<(PRNG, a)>
-    let fuzzer_value = Type::generic_var(id_gen.next());
+    let fuzzer_generic = Type::generic_var(id_gen.next());
     prelude.types.insert(
         well_known::FUZZER.to_string(),
         TypeConstructor {
             location: Span::empty(),
-            parameters: vec![fuzzer_value.clone()],
-            tipo: Type::fuzzer(fuzzer_value),
+            parameters: vec![fuzzer_generic.clone()],
+            tipo: Type::fuzzer(fuzzer_generic),
+            module: "".to_string(),
+            public: true,
+        },
+    );
+
+    // Sampler
+    //
+    // pub type Sampler<a> =
+    //   fn(Int) -> Fuzzer<a>
+    let sampler_generic = Type::generic_var(id_gen.next());
+    prelude.types.insert(
+        well_known::SAMPLER.to_string(),
+        TypeConstructor {
+            location: Span::empty(),
+            parameters: vec![sampler_generic.clone()],
+            tipo: Type::sampler(sampler_generic),
             module: "".to_string(),
             public: true,
         },
@@ -507,9 +538,40 @@ pub fn plutus(id_gen: &IdGenerator) -> TypeInfo {
 
     for builtin in DefaultFunction::iter() {
         let value = from_default_function(builtin, id_gen);
-
         plutus.values.insert(builtin.aiken_name(), value);
     }
+
+    let index_tipo = Type::function(vec![Type::data()], Type::int());
+    plutus.values.insert(
+        "unconstr_index".to_string(),
+        ValueConstructor::public(
+            index_tipo,
+            ValueConstructorVariant::ModuleFn {
+                name: "unconstr_index".to_string(),
+                field_map: None,
+                module: "aiken/builtin".to_string(),
+                arity: 1,
+                location: Span::empty(),
+                builtin: None,
+            },
+        ),
+    );
+
+    let fields_tipo = Type::function(vec![Type::data()], Type::list(Type::data()));
+    plutus.values.insert(
+        "unconstr_fields".to_string(),
+        ValueConstructor::public(
+            fields_tipo,
+            ValueConstructorVariant::ModuleFn {
+                name: "unconstr_fields".to_string(),
+                field_map: None,
+                module: "aiken/builtin".to_string(),
+                arity: 1,
+                location: Span::empty(),
+                builtin: None,
+            },
+        ),
+    );
 
     plutus
 }
@@ -908,6 +970,82 @@ pub fn from_default_function(builtin: DefaultFunction, id_gen: &IdGenerator) -> 
 
             (tipo, 2)
         }
+        DefaultFunction::AndByteString => {
+            let tipo = Type::function(
+                vec![Type::bool(), Type::byte_array(), Type::byte_array()],
+                Type::byte_array(),
+            );
+
+            (tipo, 3)
+        }
+        DefaultFunction::OrByteString => {
+            let tipo = Type::function(
+                vec![Type::bool(), Type::byte_array(), Type::byte_array()],
+                Type::byte_array(),
+            );
+
+            (tipo, 3)
+        }
+        DefaultFunction::XorByteString => {
+            let tipo = Type::function(
+                vec![Type::bool(), Type::byte_array(), Type::byte_array()],
+                Type::byte_array(),
+            );
+
+            (tipo, 3)
+        }
+        DefaultFunction::ComplementByteString => {
+            let tipo = Type::function(vec![Type::byte_array()], Type::byte_array());
+
+            (tipo, 1)
+        }
+        DefaultFunction::ReadBit => {
+            let tipo = Type::function(vec![Type::byte_array(), Type::int()], Type::bool());
+
+            (tipo, 2)
+        }
+        DefaultFunction::WriteBits => {
+            let tipo = Type::function(
+                vec![Type::byte_array(), Type::list(Type::int()), Type::bool()],
+                Type::byte_array(),
+            );
+
+            (tipo, 3)
+        }
+        DefaultFunction::ReplicateByte => {
+            let tipo = Type::function(vec![Type::int(), Type::int()], Type::byte_array());
+
+            (tipo, 2)
+        }
+        DefaultFunction::ShiftByteString => {
+            let tipo = Type::function(vec![Type::byte_array(), Type::int()], Type::byte_array());
+
+            (tipo, 2)
+        }
+        DefaultFunction::RotateByteString => {
+            let tipo = Type::function(vec![Type::byte_array(), Type::int()], Type::byte_array());
+
+            (tipo, 2)
+        }
+        DefaultFunction::CountSetBits => {
+            let tipo = Type::function(vec![Type::byte_array()], Type::int());
+
+            (tipo, 1)
+        }
+        DefaultFunction::FindFirstSetBit => {
+            let tipo = Type::function(vec![Type::byte_array()], Type::int());
+
+            (tipo, 1)
+        }
+        DefaultFunction::Ripemd_160 => {
+            let tipo = Type::function(vec![Type::byte_array()], Type::byte_array());
+
+            (tipo, 1)
+        } // DefaultFunction::ExpModInteger => {
+          //     let tipo = Type::function(vec![Type::int(), Type::int(), Type::int()], Type::int());
+
+          //     (tipo, 3)
+          // }
     };
 
     ValueConstructor::public(
@@ -928,6 +1066,134 @@ pub fn prelude_functions(
     module_types: &HashMap<String, TypeInfo>,
 ) -> IndexMap<FunctionAccessKey, TypedFunction> {
     let mut functions = IndexMap::new();
+
+    let unconstr_index_body = TypedExpr::Call {
+        location: Span::empty(),
+        tipo: Type::int(),
+        fun: TypedExpr::local_var(
+            CONSTR_INDEX_EXPOSER,
+            Type::function(vec![Type::data()], Type::int()),
+            Span::empty(),
+        )
+        .into(),
+        args: vec![CallArg {
+            label: None,
+            location: Span::empty(),
+            value: TypedExpr::Var {
+                location: Span::empty(),
+                constructor: ValueConstructor {
+                    public: true,
+                    tipo: Type::data(),
+                    variant: ValueConstructorVariant::LocalVariable {
+                        location: Span::empty(),
+                    },
+                },
+                name: "constr".to_string(),
+            },
+        }],
+    };
+
+    let unconstr_index_func = Function {
+        arguments: vec![TypedArg {
+            arg_name: ArgName::Named {
+                name: "constr".to_string(),
+                label: "constr".to_string(),
+                location: Span::empty(),
+            },
+            is_validator_param: false,
+            doc: None,
+            location: Span::empty(),
+            annotation: None,
+            tipo: Type::data(),
+        }],
+        on_test_failure: OnTestFailure::FailImmediately,
+        doc: Some(
+            indoc::indoc! {
+                r#"
+                /// Access the index of a constr typed as Data. Fails if the Data object is not a constr.
+                "#
+            }.to_string()
+        ),
+        location: Span::empty(),
+        name: "unconstr_index".to_string(),
+        public: true,
+        return_annotation: None,
+        return_type: Type::int(),
+        end_position: 0,
+        body: unconstr_index_body,
+    };
+
+    functions.insert(
+        FunctionAccessKey {
+            module_name: "aiken/builtin".to_string(),
+            function_name: "unconstr_index".to_string(),
+        },
+        unconstr_index_func,
+    );
+
+    let unconstr_fields_body = TypedExpr::Call {
+        location: Span::empty(),
+        tipo: Type::list(Type::data()),
+        fun: TypedExpr::local_var(
+            CONSTR_FIELDS_EXPOSER,
+            Type::function(vec![Type::data()], Type::list(Type::data())),
+            Span::empty(),
+        )
+        .into(),
+        args: vec![CallArg {
+            label: None,
+            location: Span::empty(),
+            value: TypedExpr::Var {
+                location: Span::empty(),
+                constructor: ValueConstructor {
+                    public: true,
+                    tipo: Type::data(),
+                    variant: ValueConstructorVariant::LocalVariable {
+                        location: Span::empty(),
+                    },
+                },
+                name: "constr".to_string(),
+            },
+        }],
+    };
+
+    let unconstr_fields_func = Function {
+        arguments: vec![TypedArg {
+            arg_name: ArgName::Named {
+                name: "constr".to_string(),
+                label: "constr".to_string(),
+                location: Span::empty(),
+            },
+            is_validator_param: false,
+            doc: None,
+            location: Span::empty(),
+            annotation: None,
+            tipo: Type::data(),
+        }],
+        on_test_failure: OnTestFailure::FailImmediately,
+        doc: Some(
+            indoc::indoc! {
+                r#"
+                /// Access the fields of a constr typed as Data. Fails if the Data object is not a constr.
+                "#
+            }.to_string()
+        ),
+        location: Span::empty(),
+        name: "unconstr_fields".to_string(),
+        public: true,
+        return_annotation: None,
+        return_type: Type::list(Type::data()),
+        end_position: 0,
+        body: unconstr_fields_body,
+    };
+
+    functions.insert(
+        FunctionAccessKey {
+            module_name: "aiken/builtin".to_string(),
+            function_name: "unconstr_fields".to_string(),
+        },
+        unconstr_fields_func,
+    );
 
     // /// Negate the argument. Useful for map/fold and pipelines.
     // pub fn not(self: Bool) -> Bool {

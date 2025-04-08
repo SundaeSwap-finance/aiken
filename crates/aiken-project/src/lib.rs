@@ -21,16 +21,17 @@ mod tests;
 
 use crate::{
     blueprint::{
+        Blueprint,
         definitions::Definitions,
         schema::{Annotated, Schema},
-        Blueprint,
     },
-    config::Config,
+    config::ProjectConfig,
     error::{Error, Warning},
     module::{CheckedModule, CheckedModules, ParsedModule, ParsedModules},
     telemetry::Event,
 };
 use aiken_lang::{
+    IdGenerator,
     ast::{
         self, DataTypeKey, Definition, FunctionAccessKey, ModuleKind, Tracing, TypedDataType,
         TypedFunction, UntypedDefinition,
@@ -40,9 +41,9 @@ use aiken_lang::{
     format::{Formatter, MAX_COLUMNS},
     gen_uplc::CodeGenerator,
     line_numbers::LineNumbers,
-    test_framework::{Test, TestResult},
+    test_framework::{RunnableKind, Test, TestResult},
     tipo::{Type, TypeInfo},
-    utils, IdGenerator,
+    utils,
 };
 use export::Export;
 use indexmap::IndexMap;
@@ -60,8 +61,8 @@ use std::{
 };
 use telemetry::EventListener;
 use uplc::{
-    ast::{Constant, Name, Program},
     PlutusData,
+    ast::{Constant, Name, Program},
 };
 
 #[derive(Debug)]
@@ -87,7 +88,7 @@ pub struct Project<T>
 where
     T: EventListener,
 {
-    config: Config,
+    config: ProjectConfig,
     defined_modules: HashMap<String, PathBuf>,
     checked_modules: CheckedModules,
     id_gen: IdGenerator,
@@ -108,7 +109,7 @@ where
     T: EventListener,
 {
     pub fn new(root: PathBuf, event_listener: T) -> Result<Project<T>, Error> {
-        let config = Config::load(&root)?;
+        let config = ProjectConfig::load(&root)?;
 
         let demanded_compiler_version = format!("v{}", config.compiler);
 
@@ -126,7 +127,7 @@ where
         Ok(project)
     }
 
-    pub fn new_with_config(config: Config, root: PathBuf, event_listener: T) -> Project<T> {
+    pub fn new_with_config(config: ProjectConfig, root: PathBuf, event_listener: T) -> Project<T> {
         let id_gen = IdGenerator::new();
 
         let mut module_types = HashMap::new();
@@ -299,6 +300,30 @@ where
         self.compile(options)
     }
 
+    pub fn benchmark(
+        &mut self,
+        match_benchmarks: Option<Vec<String>>,
+        exact_match: bool,
+        seed: u32,
+        max_size: usize,
+        tracing: Tracing,
+        env: Option<String>,
+    ) -> Result<(), Vec<Error>> {
+        let options = Options {
+            tracing,
+            env,
+            code_gen_mode: CodeGenMode::Benchmark {
+                match_benchmarks,
+                exact_match,
+                seed,
+                max_size,
+            },
+            blueprint_path: self.blueprint_path(None),
+        };
+
+        self.compile(options)
+    }
+
     pub fn dump_uplc(&self, blueprint: &Blueprint) -> Result<(), Error> {
         let dir = self.root.join("artifacts");
 
@@ -425,7 +450,7 @@ where
                     self.event_listener.handle_event(Event::RunningTests);
                 }
 
-                let tests = self.run_tests(tests, seed, property_max_success);
+                let tests = self.run_runnables(tests, seed, property_max_success);
 
                 self.checks_count = if tests.is_empty() {
                     None
@@ -451,6 +476,47 @@ where
 
                 self.event_listener
                     .handle_event(Event::FinishedTests { seed, tests });
+
+                if !errors.is_empty() {
+                    Err(errors)
+                } else {
+                    Ok(())
+                }
+            }
+            CodeGenMode::Benchmark {
+                match_benchmarks,
+                exact_match,
+                seed,
+                max_size,
+            } => {
+                let verbose = false;
+
+                let benchmarks = self.collect_benchmarks(
+                    verbose,
+                    match_benchmarks,
+                    exact_match,
+                    options.tracing,
+                )?;
+
+                if !benchmarks.is_empty() {
+                    self.event_listener.handle_event(Event::RunningBenchmarks);
+                }
+
+                let benchmarks = self.run_runnables(benchmarks, seed, max_size);
+
+                let errors: Vec<Error> = benchmarks
+                    .iter()
+                    .filter_map(|e| {
+                        if e.is_success() {
+                            None
+                        } else {
+                            Some(Error::from_test_result(e, verbose))
+                        }
+                    })
+                    .collect();
+
+                self.event_listener
+                    .handle_event(Event::FinishedBenchmarks { seed, benchmarks });
 
                 if !errors.is_empty() {
                     Err(errors)
@@ -671,12 +737,13 @@ where
         blueprint.validators = blueprint
             .validators
             .into_iter()
-            .map(|validator| {
+            .map(|mut validator| {
                 if prefix(&applied_validator.title) == prefix(&validator.title) {
-                    applied_validator.clone()
-                } else {
-                    validator
+                    validator.program = applied_validator.program.clone();
+                    validator.parameters = applied_validator.parameters.clone();
                 }
+
+                validator
             })
             .collect();
 
@@ -916,8 +983,9 @@ where
         Ok(())
     }
 
-    fn collect_tests(
+    fn collect_test_items(
         &mut self,
+        kind: RunnableKind,
         verbose: bool,
         match_tests: Option<Vec<String>>,
         exact_match: bool,
@@ -936,12 +1004,35 @@ where
                         ""
                     };
 
-                    let match_names = match_split_dot.next().map(|names| {
+                    let match_names = match_split_dot.next().and_then(|names| {
                         let names = names.replace(&['{', '}'][..], "");
-
                         let names_split_comma = names.split(',');
 
-                        names_split_comma.map(str::to_string).collect()
+                        let result = names_split_comma
+                            .filter_map(|s| {
+                                let s = s.trim();
+                                if s.is_empty() {
+                                    None
+                                } else {
+                                    Some(s.to_string())
+                                }
+                            })
+                            .collect::<Vec<_>>();
+
+                        if result.is_empty() {
+                            None
+                        } else {
+                            Some(result)
+                        }
+                    });
+
+                    self.event_listener.handle_event(Event::CollectingTests {
+                        matching_module: if match_module.is_empty() {
+                            None
+                        } else {
+                            Some(match_module.to_string())
+                        },
+                        matching_names: match_names.clone().unwrap_or_default(),
                     });
 
                     (match_module.to_string(), match_names)
@@ -949,13 +1040,26 @@ where
                 .collect::<Vec<(String, Option<Vec<String>>)>>()
         });
 
+        if match_tests.is_none() {
+            self.event_listener.handle_event(Event::CollectingTests {
+                matching_module: None,
+                matching_names: vec![],
+            });
+        }
+
         for checked_module in self.checked_modules.values() {
             if checked_module.package != self.config.name.to_string() {
                 continue;
             }
 
             for def in checked_module.ast.definitions() {
-                if let Definition::Test(func) = def {
+                let func = match (kind, def) {
+                    (RunnableKind::Test, Definition::Test(func)) => Some(func),
+                    (RunnableKind::Bench, Definition::Benchmark(func)) => Some(func),
+                    _ => None,
+                };
+
+                if let Some(func) = func {
                     if let Some(match_tests) = &match_tests {
                         let is_match = match_tests.iter().any(|(module, names)| {
                             let matched_module =
@@ -1010,17 +1114,71 @@ where
                 test.to_owned(),
                 module_name,
                 input_path,
+                kind,
             ));
+        }
+
+        // NOTE: The filtering syntax for tests isn't quite obvious. A common pitfall when willing
+        // to match over a top-level module is to simple pass in `-m module_name`, which will be
+        // treated as a match for a test name.
+        //
+        // In this case, we raise an additional warning to suggest a different match syntax, which
+        // may be quite helpful in teaching users how to deal with module filtering.
+        match match_tests.as_deref() {
+            Some(&[(ref s, Some(ref names))]) if tests.is_empty() => {
+                if let [test] = names.as_slice() {
+                    self.warnings.push(Warning::SuspiciousTestMatch {
+                        test: if s.is_empty() {
+                            test.to_string()
+                        } else {
+                            s.to_string()
+                        },
+                    });
+                }
+            }
+            _ => (),
         }
 
         Ok(tests)
     }
 
-    fn run_tests(
+    fn collect_tests(
+        &mut self,
+        verbose: bool,
+        match_tests: Option<Vec<String>>,
+        exact_match: bool,
+        tracing: Tracing,
+    ) -> Result<Vec<Test>, Error> {
+        self.collect_test_items(
+            RunnableKind::Test,
+            verbose,
+            match_tests,
+            exact_match,
+            tracing,
+        )
+    }
+
+    fn collect_benchmarks(
+        &mut self,
+        verbose: bool,
+        match_tests: Option<Vec<String>>,
+        exact_match: bool,
+        tracing: Tracing,
+    ) -> Result<Vec<Test>, Error> {
+        self.collect_test_items(
+            RunnableKind::Bench,
+            verbose,
+            match_tests,
+            exact_match,
+            tracing,
+        )
+    }
+
+    fn run_runnables(
         &self,
         tests: Vec<Test>,
         seed: u32,
-        property_max_success: usize,
+        max_success: usize,
     ) -> Vec<TestResult<UntypedExpr, UntypedExpr>> {
         use rayon::prelude::*;
 
@@ -1030,12 +1188,7 @@ where
 
         tests
             .into_par_iter()
-            .map(|test| match test {
-                Test::UnitTest(unit_test) => unit_test.run(plutus_version),
-                Test::PropertyTest(property_test) => {
-                    property_test.run(seed, property_max_success, plutus_version)
-                }
-            })
+            .map(|test| test.run(seed, max_success, plutus_version))
             .collect::<Vec<TestResult<(Constant, Rc<Type>), PlutusData>>>()
             .into_iter()
             .map(|test| test.reify(&data_types))

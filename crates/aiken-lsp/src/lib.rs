@@ -1,5 +1,5 @@
 use crate::server::Server;
-use aiken_project::{config::Config, paths};
+use aiken_project::{config::ProjectConfig, paths};
 use error::Error;
 use lsp_server::Connection;
 use std::env;
@@ -9,7 +9,7 @@ mod edits;
 pub mod error;
 mod quickfix;
 pub mod server;
-mod utils;
+pub mod utils;
 
 #[allow(clippy::result_large_err)]
 pub fn start() -> Result<(), Error> {
@@ -23,7 +23,7 @@ pub fn start() -> Result<(), Error> {
     let config = if paths::project_config().exists() {
         tracing::info!("Aiken project detected");
 
-        Some(Config::load(&root).expect("failed to load aiken.toml"))
+        Some(ProjectConfig::load(&root).expect("failed to load aiken.toml"))
     } else {
         tracing::info!("Aiken project config not found");
 

@@ -1,5 +1,5 @@
 use owo_colors::{OwoColorize, Stream::Stdout};
-use serde::{de::Visitor, Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::Visitor};
 use std::{
     fmt::{self, Display},
     str::FromStr,
@@ -74,7 +74,7 @@ impl<'de> Deserialize<'de> for PackageName {
     {
         struct PackageNameVisitor;
 
-        impl<'de> Visitor<'de> for PackageNameVisitor {
+        impl Visitor<'_> for PackageNameVisitor {
             type Value = PackageName;
 
             fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {

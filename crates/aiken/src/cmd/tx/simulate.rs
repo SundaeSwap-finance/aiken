@@ -1,8 +1,8 @@
 use miette::IntoDiagnostic;
 use owo_colors::{OwoColorize, Stream::Stderr};
 use pallas_primitives::{
-    conway::{Redeemer, TransactionInput, TransactionOutput},
     Fragment,
+    conway::{Redeemer, TransactionInput, TransactionOutput},
 };
 use pallas_traverse::{Era, MultiEraTx};
 use std::{fmt, fs, path::PathBuf, process};
@@ -137,7 +137,7 @@ pub fn exec(
                 // this should allow N scripts to be
                 let total_budget_used: Vec<ExBudget> = redeemers
                     .iter()
-                    .map(|curr| ExBudget {
+                    .map(|(curr, _)| ExBudget {
                         mem: curr.ex_units.mem as i64,
                         cpu: curr.ex_units.steps as i64,
                     })

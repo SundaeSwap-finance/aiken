@@ -66,7 +66,7 @@ pub fn exec(
         source_map,
     }: Args,
 ) -> miette::Result<()> {
-    with_project(directory.as_deref(), false, false, |p| {
+    with_project(directory.as_deref(), false, false, false, |p| {
         p.compile(Options::default())?;
 
         let export = p.export(

@@ -2,6 +2,7 @@ use crate::{
     edits::{self, AnnotatedEdit, ParsedDocument},
     server::lsp_project::LspProject,
 };
+use aiken_project::module::CheckedModule;
 use std::{collections::HashMap, str::FromStr};
 
 const UNKNOWN_VARIABLE: &str = "aiken::check::unknown::variable";
@@ -11,6 +12,7 @@ const UNKNOWN_MODULE: &str = "aiken::check::unknown::module";
 const UNUSED_IMPORT_VALUE: &str = "aiken::check::unused:import::value";
 const UNUSED_IMPORT_MODULE: &str = "aiken::check::unused::import::module";
 const USE_LET: &str = "aiken::check::single_constructor_expect";
+const UNUSED_RECORD_FIELDS: &str = "aiken::check::syntax::unused_record_fields";
 const UTF8_BYTE_ARRAY_IS_VALID_HEX_STRING: &str =
     "aiken::check::syntax::bytearray_literal_is_hex_string";
 
@@ -23,6 +25,7 @@ pub enum Quickfix {
     UnusedImports(Vec<lsp_types::Diagnostic>),
     Utf8ByteArrayIsValidHexString(lsp_types::Diagnostic),
     UseLet(lsp_types::Diagnostic),
+    UnusedRecordFields(lsp_types::Diagnostic),
 }
 
 fn match_code(
@@ -71,6 +74,10 @@ pub fn assert(diagnostic: lsp_types::Diagnostic) -> Option<Quickfix> {
         return Some(Quickfix::UseLet(diagnostic));
     }
 
+    if match_code(&diagnostic, Severity::WARNING, UNUSED_RECORD_FIELDS) {
+        return Some(Quickfix::UnusedRecordFields(diagnostic));
+    }
+
     None
 }
 
@@ -88,7 +95,12 @@ pub fn quickfix(
                     &mut actions,
                     text_document,
                     diagnostic,
-                    unknown_identifier(compiler, parsed_document, diagnostic.data.as_ref()),
+                    unknown_identifier(
+                        compiler,
+                        parsed_document,
+                        &diagnostic.range,
+                        diagnostic.data.as_ref(),
+                    ),
                 );
             }
             Quickfix::UnknownModule(diagnostic) => each_as_distinct_action(
@@ -101,7 +113,12 @@ pub fn quickfix(
                 &mut actions,
                 text_document,
                 diagnostic,
-                unknown_constructor(compiler, parsed_document, diagnostic.data.as_ref()),
+                unknown_constructor(
+                    compiler,
+                    parsed_document,
+                    &diagnostic.range,
+                    diagnostic.data.as_ref(),
+                ),
             ),
             Quickfix::UnusedImports(diagnostics) => as_single_action(
                 &mut actions,
@@ -128,6 +145,12 @@ pub fn quickfix(
                 diagnostic,
                 use_let(diagnostic),
             ),
+            Quickfix::UnusedRecordFields(diagnostic) => each_as_distinct_action(
+                &mut actions,
+                text_document,
+                diagnostic,
+                unused_record_fields(diagnostic),
+            ),
         };
     }
 
@@ -140,10 +163,19 @@ fn each_as_distinct_action(
     diagnostic: &lsp_types::Diagnostic,
     edits: Vec<AnnotatedEdit>,
 ) {
-    for (title, edit) in edits.into_iter() {
+    for edit in edits.into_iter() {
         let mut changes = HashMap::new();
 
-        changes.insert(text_document.uri.clone(), vec![edit]);
+        let title = match edit {
+            AnnotatedEdit::SimpleEdit(title, one) => {
+                changes.insert(text_document.uri.clone(), vec![one]);
+                title
+            }
+            AnnotatedEdit::CombinedEdits(title, many) => {
+                changes.insert(text_document.uri.clone(), many);
+                title
+            }
+        };
 
         actions.push(lsp_types::CodeAction {
             title,
@@ -173,7 +205,13 @@ fn as_single_action(
 
     changes.insert(
         text_document.uri.clone(),
-        edits.into_iter().map(|(_, b)| b).collect(),
+        edits
+            .into_iter()
+            .flat_map(|edit| match edit {
+                AnnotatedEdit::SimpleEdit(_, one) => vec![one],
+                AnnotatedEdit::CombinedEdits(_, many) => many,
+            })
+            .collect(),
     );
 
     actions.push(lsp_types::CodeAction {
@@ -195,14 +233,19 @@ fn as_single_action(
 fn unknown_identifier(
     compiler: &LspProject,
     parsed_document: &ParsedDocument,
+    range: &lsp_types::Range,
     data: Option<&serde_json::Value>,
 ) -> Vec<AnnotatedEdit> {
     let mut edits = Vec::new();
 
-    if let Some(serde_json::Value::String(ref var_name)) = data {
+    if let Some(serde_json::Value::String(var_name)) = data {
         for module in compiler.project.modules() {
             if module.ast.has_definition(var_name) {
                 if let Some(edit) = parsed_document.import(&module, Some(var_name)) {
+                    edits.push(edit)
+                }
+
+                if let Some(edit) = suggest_qualified(parsed_document, &module, var_name, range) {
                     edits.push(edit)
                 }
             }
@@ -215,14 +258,21 @@ fn unknown_identifier(
 fn unknown_constructor(
     compiler: &LspProject,
     parsed_document: &ParsedDocument,
+    range: &lsp_types::Range,
     data: Option<&serde_json::Value>,
 ) -> Vec<AnnotatedEdit> {
     let mut edits = Vec::new();
 
-    if let Some(serde_json::Value::String(ref constructor_name)) = data {
+    if let Some(serde_json::Value::String(constructor_name)) = data {
         for module in compiler.project.modules() {
             if module.ast.has_constructor(constructor_name) {
                 if let Some(edit) = parsed_document.import(&module, Some(constructor_name)) {
+                    edits.push(edit)
+                }
+
+                if let Some(edit) =
+                    suggest_qualified(parsed_document, &module, constructor_name, range)
+                {
                     edits.push(edit)
                 }
             }
@@ -232,6 +282,33 @@ fn unknown_constructor(
     edits
 }
 
+fn suggest_qualified(
+    parsed_document: &ParsedDocument,
+    module: &CheckedModule,
+    identifier: &str,
+    range: &lsp_types::Range,
+) -> Option<AnnotatedEdit> {
+    if let Some(AnnotatedEdit::SimpleEdit(use_qualified_title, use_qualified)) =
+        ParsedDocument::use_qualified(&module.name, identifier, range)
+    {
+        if let Some(AnnotatedEdit::SimpleEdit(_, add_new_line)) =
+            parsed_document.import(module, None)
+        {
+            return Some(AnnotatedEdit::CombinedEdits(
+                use_qualified_title,
+                vec![add_new_line, use_qualified],
+            ));
+        } else {
+            return Some(AnnotatedEdit::SimpleEdit(
+                use_qualified_title,
+                use_qualified,
+            ));
+        }
+    }
+
+    None
+}
+
 fn unknown_module(
     compiler: &LspProject,
     parsed_document: &ParsedDocument,
@@ -239,7 +316,7 @@ fn unknown_module(
 ) -> Vec<AnnotatedEdit> {
     let mut edits = Vec::new();
 
-    if let Some(serde_json::Value::String(ref module_name)) = data {
+    if let Some(serde_json::Value::String(module_name)) = data {
         for module in compiler.project.modules() {
             if module.name.ends_with(module_name) {
                 if let Some(edit) = parsed_document.import(&module, None) {
@@ -259,7 +336,7 @@ fn unused_imports(
     let mut edits = Vec::new();
 
     for data in datas.iter().rev().flatten() {
-        if let serde_json::Value::String(ref args) = data {
+        if let serde_json::Value::String(args) = data {
             let args = args.split(',').collect::<Vec<&str>>();
             match args.as_slice() {
                 &[is_qualified, start] => {
@@ -285,8 +362,8 @@ fn unused_imports(
 fn utf8_byte_array_is_hex_string(diagnostic: &lsp_types::Diagnostic) -> Vec<AnnotatedEdit> {
     let mut edits = Vec::new();
 
-    if let Some(serde_json::Value::String(ref value)) = diagnostic.data.as_ref() {
-        edits.push((
+    if let Some(serde_json::Value::String(value)) = diagnostic.data.as_ref() {
+        edits.push(AnnotatedEdit::SimpleEdit(
             "Prefix with #".to_string(),
             lsp_types::TextEdit {
                 range: diagnostic.range,
@@ -299,11 +376,27 @@ fn utf8_byte_array_is_hex_string(diagnostic: &lsp_types::Diagnostic) -> Vec<Anno
 }
 
 fn use_let(diagnostic: &lsp_types::Diagnostic) -> Vec<AnnotatedEdit> {
-    vec![(
+    vec![AnnotatedEdit::SimpleEdit(
         "Use 'let' instead of 'expect'".to_string(),
         lsp_types::TextEdit {
             range: diagnostic.range,
             new_text: "let".to_string(),
         },
     )]
+}
+
+fn unused_record_fields(diagnostic: &lsp_types::Diagnostic) -> Vec<AnnotatedEdit> {
+    let mut edits = Vec::new();
+
+    if let Some(serde_json::Value::String(new_text)) = diagnostic.data.as_ref() {
+        edits.push(AnnotatedEdit::SimpleEdit(
+            "Destructure using named fields".to_string(),
+            lsp_types::TextEdit {
+                range: diagnostic.range,
+                new_text: new_text.clone(),
+            },
+        ));
+    }
+
+    edits
 }

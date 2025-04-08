@@ -10,19 +10,19 @@ use crate::{
     },
     line_numbers::{LineColumn, LineNumbers},
     tipo::{
-        check_replaceable_opaque_type, convert_opaque_type, find_and_replace_generics, Type,
-        ValueConstructor, ValueConstructorVariant,
+        Type, ValueConstructor, ValueConstructorVariant, check_replaceable_opaque_type,
+        convert_opaque_type, find_and_replace_generics,
     },
 };
 use indexmap::IndexMap;
 use itertools::{Itertools, Position};
 use std::{ops::Deref, rc::Rc};
 use uplc::{
+    KeyValuePairs, PlutusData,
     ast::{Constant as UplcConstant, Data, Name, Term, Type as UplcType},
     builder::{CONSTR_FIELDS_EXPOSER, CONSTR_INDEX_EXPOSER},
     builtins::DefaultFunction,
     machine::{runtime::Compressable, value::to_pallas_bigint},
-    KeyValuePairs, PlutusData,
 };
 
 pub type Variant = String;
@@ -100,7 +100,12 @@ impl CodeGenSpecialFuncs {
         );
 
         CodeGenSpecialFuncs {
-            used_funcs: vec![],
+            // Always use these functions since they are filtered out automatically by
+            // the optimization code later on
+            used_funcs: vec![
+                CONSTR_FIELDS_EXPOSER.to_string(),
+                CONSTR_INDEX_EXPOSER.to_string(),
+            ],
             key_to_func,
         }
     }

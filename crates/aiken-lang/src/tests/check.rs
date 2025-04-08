@@ -1,22 +1,33 @@
 use crate::{
-    ast::{Definition, ModuleKind, Pattern, TraceLevel, Tracing, TypedModule, UntypedModule},
+    IdGenerator,
+    ast::{
+        Definition, ModuleKind, Pattern, TraceLevel, Tracing, TypedModule, UntypedModule,
+        UntypedPattern,
+    },
     builtins,
-    expr::TypedExpr,
+    expr::{CallArg, Span, TypedExpr},
     parser,
     tipo::error::{Error, UnifyErrorSituation, Warning},
-    IdGenerator,
 };
 use std::collections::HashMap;
 
+const DEFAULT_MODULE_NAME: &str = "my_module";
+const DEFAULT_PACKAGE: &str = "test/project";
+
 fn parse(source_code: &str) -> UntypedModule {
+    parse_as(source_code, DEFAULT_MODULE_NAME)
+}
+
+fn parse_as(source_code: &str, name: &str) -> UntypedModule {
     let kind = ModuleKind::Lib;
-    let (ast, _) = parser::module(source_code, kind).expect("Failed to parse module");
+    let (mut ast, _) = parser::module(source_code, kind).expect("Failed to parse module");
+    ast.name = name.to_string();
     ast
 }
 
 fn check_module(
     ast: UntypedModule,
-    extra: Vec<(String, UntypedModule)>,
+    extra: Vec<UntypedModule>,
     kind: ModuleKind,
     tracing: Tracing,
 ) -> Result<(Vec<Warning>, TypedModule), (Vec<Warning>, Error)> {
@@ -28,26 +39,34 @@ fn check_module(
     module_types.insert("aiken".to_string(), builtins::prelude(&id_gen));
     module_types.insert("aiken/builtin".to_string(), builtins::plutus(&id_gen));
 
-    for (package, module) in extra {
+    for module in extra {
         let mut warnings = vec![];
+
+        if module.name == DEFAULT_MODULE_NAME {
+            panic!(
+                "passed extra modules with default name! Use 'parse_as' to define tests instead of 'parse'."
+            );
+        }
+
         let typed_module = module
             .infer(
                 &id_gen,
                 kind,
-                &package,
+                DEFAULT_PACKAGE,
                 &module_types,
                 Tracing::All(TraceLevel::Verbose),
                 &mut warnings,
                 None,
             )
             .expect("extra dependency did not compile");
-        module_types.insert(package.clone(), typed_module.type_info.clone());
+
+        module_types.insert(typed_module.name.clone(), typed_module.type_info.clone());
     }
 
     let result = ast.infer(
         &id_gen,
         kind,
-        "test/project",
+        DEFAULT_PACKAGE,
         &module_types,
         tracing,
         &mut warnings,
@@ -72,7 +91,7 @@ fn check_with_verbosity(
 
 fn check_with_deps(
     ast: UntypedModule,
-    extra: Vec<(String, UntypedModule)>,
+    extra: Vec<UntypedModule>,
 ) -> Result<(Vec<Warning>, TypedModule), (Vec<Warning>, Error)> {
     check_module(ast, extra, ModuleKind::Lib, Tracing::verbose())
 }
@@ -1304,8 +1323,8 @@ fn trace_non_string_label_compact() {
     "#;
 
     assert!(matches!(
-        check_with_verbosity(parse(source_code), TraceLevel::Compact),
-        Err((_, Error::CouldNotUnify { .. }))
+        &check_with_verbosity(parse(source_code), TraceLevel::Compact),
+        Ok((warnings, _)) if warnings == &[Warning::CompactTraceLabelIsNotstring { location: Span::create(40, 7) }],
     ))
 }
 
@@ -1778,6 +1797,16 @@ fn fuzzer_ok_basic() {
 }
 
 #[test]
+fn sampler_ok_basic() {
+    let source_code = r#"
+        fn int() -> Sampler<Int> { todo }
+        bench prop(n via int()) { True }
+    "#;
+
+    assert!(check(parse(source_code)).is_ok());
+}
+
+#[test]
 fn fuzzer_ok_explicit() {
     let source_code = r#"
         fn int(prng: PRNG) -> Option<(PRNG, Int)> { todo }
@@ -2241,6 +2270,524 @@ fn allow_expect_into_opaque_type_constructor_without_typecasting_in_module() {
 }
 
 #[test]
+fn use_imported_type_as_namespace_for_patterns() {
+    let dependency = r#"
+        pub type Credential {
+          VerificationKey(ByteArray)
+          Script(ByteArray)
+        }
+    "#;
+
+    let source_code = r#"
+        use cardano/address.{Credential, Script, VerificationKey}
+
+        pub fn compare(left: Credential, right: Credential) -> Ordering {
+          when left is {
+            Script(left) ->
+              when right is {
+                Script(right) -> Equal
+                _ -> Less
+              }
+            VerificationKey(left) ->
+              when right is {
+                Script(_) -> Greater
+                VerificationKey(right) -> Equal
+              }
+          }
+        }
+    "#;
+
+    let result = check_with_deps(
+        parse(source_code),
+        vec![(parse_as(dependency, "cardano/address"))],
+    );
+
+    assert!(matches!(result, Ok(..)), "{result:#?}");
+}
+
+#[test]
+fn use_type_as_namespace_for_patterns() {
+    let dependency = r#"
+        pub type Foo {
+          A { a: Int }
+          B
+        }
+    "#;
+
+    let source_code = r#"
+        use thing.{Foo}
+
+        fn bar(foo: Foo) {
+          when foo is {
+            Foo.A { a } -> a > 10
+            Foo.B -> False
+          }
+        }
+    "#;
+
+    let result = check_with_deps(parse(source_code), vec![(parse_as(dependency, "thing"))]);
+
+    assert!(matches!(result, Ok(..)), "{result:#?}");
+}
+
+#[test]
+fn use_nested_type_as_namespace_for_patterns() {
+    let dependency = r#"
+        pub type Foo {
+          A { a: Int }
+          B
+        }
+    "#;
+
+    let source_code = r#"
+        use foo.{Foo}
+
+        fn bar(x: Foo) {
+          when x is {
+            foo.Foo.A { a } -> a > 10
+            foo.Foo.B -> False
+          }
+        }
+    "#;
+
+    let result = check_with_deps(parse(source_code), vec![(parse_as(dependency, "foo"))]);
+
+    assert!(matches!(result, Ok(..)), "{result:#?}");
+}
+
+#[test]
+fn use_opaque_type_as_namespace_for_patterns_fails() {
+    let dependency = r#"
+        pub opaque type Foo {
+          A { a: Int }
+          B
+        }
+    "#;
+
+    let source_code = r#"
+        use thing.{Foo}
+
+        fn bar(foo: Foo) {
+          when foo is {
+            Foo.A { a } -> a > 10
+            Foo.B -> False
+          }
+        }
+    "#;
+
+    let result = check_with_deps(parse(source_code), vec![(parse_as(dependency, "thing"))]);
+
+    assert!(
+        matches!(
+            &result,
+            Err((warnings, Error::UnknownTypeConstructor { name, .. })) if name == "A" && warnings.is_empty(),
+        ),
+        "{result:#?}"
+    );
+}
+
+#[test]
+fn use_wrong_type_as_namespace_for_patterns_fails() {
+    let dependency = r#"
+        pub type Foo {
+          A { a: Int }
+          B
+        }
+
+        pub type Bar {
+          C
+          D
+        }
+    "#;
+
+    let source_code = r#"
+        use thing.{Foo}
+
+        fn bar(foo: Foo) {
+          when foo is {
+            Foo.A { .. } -> True
+            Foo.D -> False
+          }
+        }
+    "#;
+
+    let result = check_with_deps(parse(source_code), vec![(parse_as(dependency, "thing"))]);
+
+    assert!(
+        matches!(
+            &result,
+            Err((warnings, Error::UnknownTypeConstructor { name, .. })) if name == "D" && warnings.is_empty(),
+        ),
+        "{result:#?}"
+    );
+}
+
+#[test]
+fn use_type_as_namespace_for_constructors() {
+    let dependency = r#"
+        pub type Foo {
+          I { i: Int }
+          B(Bool)
+        }
+    "#;
+
+    let source_code = r#"
+        use foo.{Foo}
+
+        test my_test() {
+          and {
+            Foo.I { i: 42 } == foo.I(42),
+            foo.B(True) == Foo.B(True),
+          }
+        }
+    "#;
+
+    let result = check_with_deps(parse(source_code), vec![(parse_as(dependency, "foo"))]);
+
+    assert!(matches!(result, Ok(..)), "{result:#?}");
+}
+
+#[test]
+fn use_type_as_nested_namespace_for_constructors() {
+    let dependency = r#"
+        pub type Foo {
+          I { i: Int }
+          B(Bool)
+        }
+    "#;
+
+    let source_code = r#"
+        use foo
+
+        test my_test() {
+          trace foo.Foo.I { i: 42 }
+          trace foo.Foo.B(False)
+          Void
+        }
+    "#;
+
+    let result = check_with_deps(parse(source_code), vec![(parse_as(dependency, "foo"))]);
+
+    assert!(matches!(result, Ok(..)), "{result:#?}");
+}
+
+#[test]
+fn use_type_as_nested_namespace_for_constructors_from_multi_level_module() {
+    let dependency = r#"
+        pub type Foo {
+          I { i: Int }
+          B(Bool)
+        }
+    "#;
+
+    let source_code = r#"
+        use foo/bar
+
+        test my_test() {
+          trace bar.Foo.I { i: 42 }
+          trace bar.Foo.B(True)
+          Void
+        }
+    "#;
+
+    let result = check_with_deps(parse(source_code), vec![(parse_as(dependency, "foo/bar"))]);
+
+    assert!(matches!(result, Ok(..)), "{result:#?}");
+}
+
+#[test]
+fn use_type_as_nested_namespace_for_constructors_from_module_alias() {
+    let dependency = r#"
+        pub type Foo {
+          I { i: Int }
+          B(Bool)
+        }
+    "#;
+
+    let source_code = r#"
+        use foo as bar
+
+        test my_test() {
+          trace bar.Foo.I { i: 42 }
+          trace bar.Foo.B(True)
+          Void
+        }
+    "#;
+
+    let result = check_with_deps(parse(source_code), vec![(parse_as(dependency, "foo"))]);
+
+    assert!(matches!(result, Ok(..)), "{result:#?}");
+}
+
+#[test]
+fn use_type_as_namespace_unknown_constructor() {
+    let dependency = r#"
+        pub type Foo {
+          I { i: Int }
+          B(Bool)
+        }
+    "#;
+
+    let source_code = r#"
+        use foo.{Foo}
+
+        test my_test() {
+          Foo.I(42) == Foo.A
+        }
+    "#;
+
+    let result = check_with_deps(parse(source_code), vec![(parse_as(dependency, "foo"))]);
+
+    assert!(
+        matches!(
+            &result,
+            Err((warnings, Error::UnknownTypeConstructor { name, .. })) if name == "A" && warnings.is_empty(),
+        ),
+        "{result:#?}"
+    );
+}
+
+#[test]
+fn use_wrong_type_as_namespace() {
+    let dependency = r#"
+        pub type Foo {
+          I { i: Int }
+          B(Bool)
+        }
+
+        pub type Bar {
+          S { s: String }
+          L(List<Int>)
+        }
+    "#;
+
+    let source_code = r#"
+        use foo.{Foo}
+
+        test my_test() {
+          trace Foo.S(@"wut")
+          Void
+        }
+    "#;
+
+    let result = check_with_deps(parse(source_code), vec![(parse_as(dependency, "foo"))]);
+
+    assert!(
+        matches!(
+            &result,
+            Err((warnings, Error::UnknownTypeConstructor { name, .. })) if name == "S" && warnings.is_empty(),
+        ),
+        "{result:#?}"
+    );
+}
+
+#[test]
+fn use_wrong_nested_type_as_namespace() {
+    let dependency = r#"
+        pub type Foo {
+          I { i: Int }
+          B(Bool)
+        }
+
+        pub type Bar {
+          S { s: String }
+          L(List<Int>)
+        }
+    "#;
+
+    let source_code = r#"
+        use foo
+
+        test my_test() {
+          trace foo.Foo.S(@"wut")
+          Void
+        }
+    "#;
+
+    let result = check_with_deps(parse(source_code), vec![(parse_as(dependency, "foo"))]);
+
+    assert!(
+        matches!(
+            &result,
+            Err((warnings, Error::UnknownTypeConstructor { name, .. })) if name == "S" && warnings.is_empty(),
+        ),
+        "{result:#?}"
+    );
+}
+
+#[test]
+fn use_private_type_as_nested_namespace_fails() {
+    let dependency = r#"
+        type Foo {
+          I { i: Int }
+          B(Bool)
+        }
+    "#;
+
+    let source_code = r#"
+        use foo
+
+        test my_test() {
+          trace foo.Foo.I { i: 42 }
+          Void
+        }
+    "#;
+
+    let result = check_with_deps(parse(source_code), vec![(parse_as(dependency, "foo"))]);
+
+    assert!(
+        matches!(
+            &result,
+            Err((warnings, Error::UnknownModuleType { name, .. })) if name == "Foo" && warnings.is_empty(),
+        ),
+        "{result:#?}"
+    );
+}
+
+#[test]
+fn use_opaque_type_as_namespace_for_constructors_fails() {
+    let dependency = r#"
+        pub opaque type Foo {
+          I { i: Int }
+          B(Bool)
+        }
+    "#;
+
+    let source_code = r#"
+        use foo.{Foo}
+
+        test my_test() {
+          trace Foo.I(42)
+          Void
+        }
+    "#;
+
+    let result = check_with_deps(parse(source_code), vec![(parse_as(dependency, "foo"))]);
+
+    assert!(
+        matches!(
+            &result,
+            Err((warnings, Error::UnknownTypeConstructor { name, .. })) if name == "I" && warnings.is_empty(),
+        ),
+        "{result:#?}"
+    );
+}
+
+#[test]
+fn use_opaque_type_as_nested_namespace_for_constructors_fails() {
+    let dependency = r#"
+        pub opaque type Foo {
+          I { i: Int }
+          B(Bool)
+        }
+    "#;
+
+    let source_code = r#"
+        use foo
+
+        test my_test() {
+          trace foo.Foo.I(42)
+          Void
+        }
+    "#;
+
+    let result = check_with_deps(parse(source_code), vec![(parse_as(dependency, "foo"))]);
+
+    assert!(
+        matches!(
+            &result,
+            Err((warnings, Error::UnknownTypeConstructor { name, .. })) if name == "I" && warnings.is_empty(),
+        ),
+        "{result:#?}"
+    );
+}
+
+#[test]
+fn use_non_imported_module_as_namespace() {
+    let dependency = r#"
+        pub type Foo {
+          I(Int)
+          B(Bool)
+        }
+    "#;
+
+    let source_code = r#"
+        test my_test() {
+          trace foo.Foo.I(14)
+          Void
+        }
+    "#;
+
+    let result = check_with_deps(parse(source_code), vec![(parse_as(dependency, "foo"))]);
+
+    assert!(
+        matches!(
+            &result,
+            Err((warnings, Error::UnknownModule { name, .. })) if name == "foo" && warnings.is_empty(),
+        ),
+        "{result:#?}"
+    );
+}
+
+#[test]
+fn invalid_type_field_access_chain() {
+    let dependency = r#"
+        pub type Foo {
+          I(Int)
+          B(Bool)
+        }
+    "#;
+
+    let source_code = r#"
+        use foo.{Foo}
+
+        test my_test() {
+          trace Foo.I.Int(42)
+          Void
+        }
+    "#;
+
+    let result = check_with_deps(parse(source_code), vec![(parse_as(dependency, "foo"))]);
+
+    assert!(
+        matches!(
+            &result,
+            Err((warnings, Error::InvalidFieldAccess { .. })) if warnings.is_empty(),
+        ),
+        "{result:#?}"
+    );
+}
+
+#[test]
+fn invalid_type_field_access_chain_2() {
+    let dependency = r#"
+        pub type Foo {
+          I(Int)
+          B(Bool)
+        }
+    "#;
+
+    let source_code = r#"
+        use foo.{Foo}
+
+        test my_test() {
+          trace Foo.i(42)
+          Void
+        }
+    "#;
+
+    let result = check_with_deps(parse(source_code), vec![(parse_as(dependency, "foo"))]);
+
+    assert!(
+        matches!(
+            &result,
+            Err((warnings, Error::UnknownTypeConstructor { .. })) if warnings.is_empty(),
+        ),
+        "{result:#?}"
+    );
+}
+
+#[test]
 fn forbid_importing_or_using_opaque_constructors() {
     let dependency = r#"
         pub opaque type Thing {
@@ -2250,7 +2797,7 @@ fn forbid_importing_or_using_opaque_constructors() {
     "#;
 
     let source_code = r#"
-        use foo/thing.{Thing, Foo}
+        use thing.{Thing, Foo}
 
         fn bar(thing: Thing) {
           expect Foo(a) = thing
@@ -2259,15 +2806,12 @@ fn forbid_importing_or_using_opaque_constructors() {
     "#;
 
     assert!(matches!(
-        check_with_deps(
-            parse(source_code),
-            vec![("foo/thing".to_string(), parse(dependency))],
-        ),
+        check_with_deps(parse(source_code), vec![(parse_as(dependency, "thing"))],),
         Err((_, Error::UnknownModuleField { .. })),
     ));
 
     let source_code = r#"
-        use foo/thing.{Thing}
+        use thing.{Thing}
 
         fn bar(thing: Thing) {
           expect Foo(a) = thing
@@ -2276,10 +2820,7 @@ fn forbid_importing_or_using_opaque_constructors() {
     "#;
 
     assert!(matches!(
-        check_with_deps(
-            parse(source_code),
-            vec![("foo/thing".to_string(), parse(dependency))],
-        ),
+        check_with_deps(parse(source_code), vec![(parse_as(dependency, "thing"))],),
         Err((_, Error::UnknownTypeConstructor { .. })),
     ));
 }
@@ -2437,7 +2978,7 @@ fn correct_span_for_backpassing_args() {
     let (warnings, _ast) = check(parse(source_code)).unwrap();
 
     assert!(
-        matches!(&warnings[0], Warning::UnusedVariable { ref name, location } if name == "b" && location.start == 245 && location.end == 246)
+        matches!(&warnings[0], Warning::UnusedVariable { name, location } if name == "b" && location.start == 245 && location.end == 246)
     );
 }
 
@@ -2868,7 +3409,7 @@ fn side_effects() {
 
     assert!(warnings.is_empty(), "no warnings: {warnings:#?}");
 
-    if let Some(Definition::Fn(ref foo)) = ast.definitions().last() {
+    if let Some(Definition::Fn(foo)) = ast.definitions().last() {
         if let TypedExpr::Sequence {
             ref expressions, ..
         } = foo.body
@@ -3297,6 +3838,44 @@ fn softcasting_unused_let_binding() {
 }
 
 #[test]
+fn dangling_let_in_block() {
+    let source_code = r#"
+        fn for_each(xs: List<Int>, with: fn(Int) -> a) -> a {
+            todo
+        }
+
+        test foo() {
+            {
+                let _ <- for_each([1, 2, 3])
+            }
+        }
+    "#;
+
+    let result = check_validator(parse(source_code));
+
+    assert!(
+        matches!(result, Err((_, Error::LastExpressionIsAssignment { .. }))),
+        "{result:?}"
+    )
+}
+
+#[test]
+fn default_trace_return() {
+    let source_code = r#"
+        fn debug() {
+          trace @"patate": Void
+        }
+
+        test foo() {
+            debug()
+            True
+        }
+    "#;
+
+    assert!(matches!(check_validator(parse(source_code)), Ok(..)))
+}
+
+#[test]
 fn dangling_trace_let_standalone() {
     let source_code = r#"
         test foo() {
@@ -3444,4 +4023,261 @@ fn constant_generic_inferred_3() {
 fn constant_generic_empty() {
     let source_code = r#"const foo: List<a> = []"#;
     assert!(check_validator(parse(source_code)).is_ok());
+}
+
+#[test]
+fn unused_record_fields_1() {
+    let source_code = r#"
+        pub type Foo {
+          Foo { field0: Bool, field1: Bool }
+          Bar
+        }
+
+        test confusing() {
+          let foo = Foo(True, True)
+          when foo is {
+            Foo(field1, field0) -> field0 || field1
+            _ -> False
+          }
+        }
+    "#;
+
+    let result = check_validator(parse(source_code));
+    assert!(result.is_ok());
+
+    let (warnings, _) = result.unwrap();
+    assert_eq!(
+        warnings[0],
+        Warning::UnusedRecordFields {
+            location: Span::create(193, 19),
+            suggestion: UntypedPattern::Constructor {
+                is_record: true,
+                location: Span::create(193, 19),
+                name: "Foo".to_string(),
+                arguments: vec![
+                    CallArg {
+                        label: Some("field0".to_string()),
+                        location: Span::create(197, 6),
+                        value: Pattern::Var {
+                            location: Span::create(197, 6),
+                            name: "field1".to_string()
+                        }
+                    },
+                    CallArg {
+                        label: Some("field1".to_string()),
+                        location: Span::create(205, 6),
+                        value: Pattern::Var {
+                            location: Span::create(205, 6),
+                            name: "field0".to_string()
+                        }
+                    }
+                ],
+                module: None,
+                constructor: (),
+                spread_location: None,
+                tipo: ()
+            }
+        }
+    );
+}
+
+#[test]
+fn unused_record_fields_2() {
+    let source_code = r#"
+        pub type Foo {
+          Foo { field0: Bool, field1: Bool }
+          Bar
+        }
+
+        test confusing() {
+          let foo = Foo(True, True)
+          when foo is {
+            Foo(field0, field1) -> field0 || field1
+            _ -> False
+          }
+        }
+    "#;
+
+    let result = check_validator(parse(source_code));
+    assert!(result.is_ok());
+
+    let (warnings, _) = result.unwrap();
+    assert_eq!(
+        warnings[0],
+        Warning::UnusedRecordFields {
+            location: Span::create(193, 19),
+            suggestion: UntypedPattern::Constructor {
+                is_record: true,
+                location: Span::create(193, 19),
+                name: "Foo".to_string(),
+                arguments: vec![
+                    CallArg {
+                        label: Some("field0".to_string()),
+                        location: Span::create(197, 6),
+                        value: Pattern::Var {
+                            location: Span::create(197, 6),
+                            name: "field0".to_string()
+                        }
+                    },
+                    CallArg {
+                        label: Some("field1".to_string()),
+                        location: Span::create(205, 6),
+                        value: Pattern::Var {
+                            location: Span::create(205, 6),
+                            name: "field1".to_string()
+                        }
+                    }
+                ],
+                module: None,
+                constructor: (),
+                spread_location: None,
+                tipo: ()
+            }
+        }
+    );
+}
+
+#[test]
+fn unused_record_fields_3() {
+    let source_code = r#"
+        pub type Foo {
+          Foo { field0: Bool, field1: Bool }
+          Bar
+        }
+
+        test confusing() {
+          let foo = Foo(True, True)
+          when foo is {
+            Foo(a, _) -> a
+            _ -> False
+          }
+        }
+    "#;
+
+    let result = check_validator(parse(source_code));
+    assert!(result.is_ok());
+
+    let (warnings, _) = result.unwrap();
+    assert_eq!(
+        warnings[0],
+        Warning::UnusedRecordFields {
+            location: Span::create(193, 9),
+            suggestion: UntypedPattern::Constructor {
+                is_record: true,
+                location: Span::create(193, 9),
+                name: "Foo".to_string(),
+                arguments: vec![CallArg {
+                    label: Some("field0".to_string()),
+                    location: Span::create(197, 6),
+                    value: Pattern::Var {
+                        location: Span::create(197, 1),
+                        name: "a".to_string()
+                    }
+                },],
+                module: None,
+                constructor: (),
+                spread_location: Some(Span::create(199, 2)),
+                tipo: ()
+            }
+        }
+    );
+}
+
+#[test]
+fn unused_record_fields_4() {
+    let source_code = r#"
+        pub type Foo {
+          Foo { field0: Bool, field1: Bool }
+          Bar
+        }
+
+        test confusing() {
+          let foo = Foo(True, True)
+          when foo is {
+            Foo(a, ..) -> a
+            _ -> False
+          }
+        }
+    "#;
+
+    let result = check_validator(parse(source_code));
+    assert!(result.is_ok());
+
+    let (warnings, _) = result.unwrap();
+    assert_eq!(
+        warnings[0],
+        Warning::UnusedRecordFields {
+            location: Span::create(193, 10),
+            suggestion: UntypedPattern::Constructor {
+                is_record: true,
+                location: Span::create(193, 10),
+                name: "Foo".to_string(),
+                arguments: vec![CallArg {
+                    label: Some("field0".to_string()),
+                    location: Span::create(197, 6),
+                    value: Pattern::Var {
+                        location: Span::create(197, 1),
+                        name: "a".to_string()
+                    }
+                },],
+                module: None,
+                constructor: (),
+                spread_location: Some(Span::create(200, 2)),
+                tipo: ()
+            }
+        }
+    );
+}
+
+#[test]
+fn unused_record_fields_5() {
+    let source_code = r#"
+        pub type Foo {
+          b_is_before_a: Bool,
+          a_is_after_b: Bool,
+        }
+
+        test confusing() {
+          let Foo(a, b) = Foo(True, True)
+          a || b
+        }
+    "#;
+
+    let result = check_validator(parse(source_code));
+    assert!(result.is_ok());
+
+    let (warnings, _) = result.unwrap();
+    assert_eq!(
+        warnings[0],
+        Warning::UnusedRecordFields {
+            location: Span::create(137, 9),
+            suggestion: UntypedPattern::Constructor {
+                is_record: true,
+                location: Span::create(137, 9),
+                name: "Foo".to_string(),
+                arguments: vec![
+                    CallArg {
+                        label: Some("b_is_before_a".to_string()),
+                        location: Span::create(141, 13),
+                        value: Pattern::Var {
+                            location: Span::create(141, 1),
+                            name: "a".to_string()
+                        }
+                    },
+                    CallArg {
+                        label: Some("a_is_after_b".to_string()),
+                        location: Span::create(144, 12),
+                        value: Pattern::Var {
+                            location: Span::create(144, 1),
+                            name: "b".to_string()
+                        }
+                    }
+                ],
+                module: None,
+                constructor: (),
+                spread_location: None,
+                tipo: ()
+            }
+        }
+    );
 }

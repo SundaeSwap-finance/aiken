@@ -1,14 +1,20 @@
-import { Lucid } from "https://deno.land/x/lucid@0.8.3/mod.ts";
+import { MeshWallet } from "@meshsdk/core";
+import fs from "node:fs";
 
-const lucid = await Lucid.new(undefined, "Preview");
+async function main() {
+  const secret_key = MeshWallet.brew(true) as string;
 
-const privateKey = lucid
-  .utils
-  .generatePrivateKey();
-await Deno.writeTextFile("key.sk", privateKey);
+  fs.writeFileSync("me.sk", secret_key);
 
-const address = await lucid
-  .selectWalletFromPrivateKey(privateKey)
-  .wallet
-  .address();
-await Deno.writeTextFile("key.addr", address);
+  const wallet = new MeshWallet({
+    networkId: 0,
+    key: {
+      type: "root",
+      bech32: secret_key,
+    },
+  });
+
+  fs.writeFileSync("me.addr", (await wallet.getUnusedAddresses())[0]);
+}
+
+main();

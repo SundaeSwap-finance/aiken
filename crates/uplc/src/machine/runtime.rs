@@ -1,7 +1,7 @@
 use super::{
+    Error, Trace, Value,
     cost_model::{BuiltinCosts, ExBudget},
     value::{from_pallas_bigint, to_pallas_bigint},
-    Error, Value,
 };
 use crate::{
     ast::{Constant, Data, Type},
@@ -9,9 +9,11 @@ use crate::{
     machine::value::integer_log2,
     plutus_data_to_bytes,
 };
+use bitvec::{order::Msb0, vec::BitVec};
+use itertools::Itertools;
 use num_bigint::BigInt;
 use num_integer::Integer;
-use num_traits::{Signed, Zero};
+use num_traits::{FromPrimitive, Signed, Zero};
 use once_cell::sync::Lazy;
 use pallas_primitives::conway::{Language, PlutusData};
 use std::{mem::size_of, ops::Deref, rc::Rc};
@@ -51,7 +53,7 @@ impl From<&Language> for BuiltinSemantics {
 #[derive(Clone, Debug, PartialEq)]
 pub struct BuiltinRuntime {
     pub(super) args: Vec<Value>,
-    fun: DefaultFunction,
+    pub fun: DefaultFunction,
     pub(super) forces: u32,
 }
 
@@ -80,8 +82,8 @@ impl BuiltinRuntime {
         self.forces += 1;
     }
 
-    pub fn call(&self, language: &Language, logs: &mut Vec<String>) -> Result<Value, Error> {
-        self.fun.call(language.into(), &self.args, logs)
+    pub fn call(&self, language: &Language, traces: &mut Vec<Trace>) -> Result<Value, Error> {
+        self.fun.call(language.into(), &self.args, traces)
     }
 
     pub fn push(&mut self, arg: Value) -> Result<(), Error> {
@@ -177,7 +179,22 @@ impl DefaultFunction {
             | DefaultFunction::Bls12_381_MulMlResult
             | DefaultFunction::Bls12_381_FinalVerify
             | DefaultFunction::IntegerToByteString
-            | DefaultFunction::ByteStringToInteger => false,
+            | DefaultFunction::ByteStringToInteger
+            | DefaultFunction::AndByteString
+            | DefaultFunction::OrByteString
+            | DefaultFunction::XorByteString
+            | DefaultFunction::ComplementByteString
+            | DefaultFunction::ReadBit
+            | DefaultFunction::WriteBits
+            | DefaultFunction::ReplicateByte
+            | DefaultFunction::ShiftByteString
+            | DefaultFunction::RotateByteString
+            | DefaultFunction::CountSetBits
+            | DefaultFunction::FindFirstSetBit
+            | DefaultFunction::Ripemd_160 => false,
+            // | DefaultFunction::ExpModInteger
+            // | DefaultFunction::CaseList
+            // | DefaultFunction::CaseData
         }
     }
 
@@ -258,6 +275,19 @@ impl DefaultFunction {
             DefaultFunction::Bls12_381_FinalVerify => 2,
             DefaultFunction::IntegerToByteString => 3,
             DefaultFunction::ByteStringToInteger => 2,
+            DefaultFunction::AndByteString => 3,
+            DefaultFunction::OrByteString => 3,
+            DefaultFunction::XorByteString => 3,
+            DefaultFunction::ComplementByteString => 1,
+            DefaultFunction::ReadBit => 2,
+            DefaultFunction::WriteBits => 3,
+            DefaultFunction::ReplicateByte => 2,
+            DefaultFunction::ShiftByteString => 2,
+            DefaultFunction::RotateByteString => 2,
+            DefaultFunction::CountSetBits => 1,
+            DefaultFunction::FindFirstSetBit => 1,
+            DefaultFunction::Ripemd_160 => 1,
+            // DefaultFunction::ExpModInteger => 3,
         }
     }
 
@@ -338,6 +368,19 @@ impl DefaultFunction {
             DefaultFunction::Bls12_381_FinalVerify => 0,
             DefaultFunction::IntegerToByteString => 0,
             DefaultFunction::ByteStringToInteger => 0,
+            DefaultFunction::AndByteString => 0,
+            DefaultFunction::OrByteString => 0,
+            DefaultFunction::XorByteString => 0,
+            DefaultFunction::ComplementByteString => 0,
+            DefaultFunction::ReadBit => 0,
+            DefaultFunction::WriteBits => 0,
+            DefaultFunction::ReplicateByte => 0,
+            DefaultFunction::ShiftByteString => 0,
+            DefaultFunction::RotateByteString => 0,
+            DefaultFunction::CountSetBits => 0,
+            DefaultFunction::FindFirstSetBit => 0,
+            DefaultFunction::Ripemd_160 => 0,
+            // DefaultFunction::ExpModInteger => 0,
         }
     }
 
@@ -345,7 +388,7 @@ impl DefaultFunction {
         &self,
         semantics: BuiltinSemantics,
         args: &[Value],
-        logs: &mut Vec<String>,
+        traces: &mut Vec<Trace>,
     ) -> Result<Value, Error> {
         match self {
             DefaultFunction::AddInteger => {
@@ -734,7 +777,11 @@ impl DefaultFunction {
             DefaultFunction::Trace => {
                 let arg1 = args[0].unwrap_string()?;
 
-                logs.push(arg1.clone());
+                if arg1.starts_with('\0') {
+                    traces.push(Trace::Label(arg1.split_at(1).1.to_string()));
+                } else {
+                    traces.push(Trace::Log(arg1.clone()));
+                }
 
                 Ok(args[1].clone())
             }
@@ -1454,6 +1501,271 @@ impl DefaultFunction {
 
                 Ok(Value::Con(constant.into()))
             }
+            DefaultFunction::AndByteString => {
+                let should_pad = args[0].unwrap_bool()?;
+                let bytes1 = args[1].unwrap_byte_string()?;
+                let bytes2 = args[2].unwrap_byte_string()?;
+
+                let bytes_result = if *should_pad {
+                    bytes1
+                        .iter()
+                        .zip_longest(bytes2)
+                        .map(|b| match b {
+                            itertools::EitherOrBoth::Both(left_byte, right_byte) => {
+                                left_byte & right_byte
+                            }
+                            // Shorter is appended with FF bytes that when and-ed produce the other bytestring
+                            itertools::EitherOrBoth::Left(byte)
+                            | itertools::EitherOrBoth::Right(byte) => *byte,
+                        })
+                        .collect_vec()
+                } else {
+                    bytes1
+                        .iter()
+                        .zip(bytes2)
+                        .map(|(b1, b2)| b1 & b2)
+                        .collect_vec()
+                };
+
+                Ok(Value::byte_string(bytes_result))
+            }
+            DefaultFunction::OrByteString => {
+                let should_pad = args[0].unwrap_bool()?;
+                let bytes1 = args[1].unwrap_byte_string()?;
+                let bytes2 = args[2].unwrap_byte_string()?;
+
+                let bytes_result = if *should_pad {
+                    bytes1
+                        .iter()
+                        .zip_longest(bytes2)
+                        .map(|b| match b {
+                            itertools::EitherOrBoth::Both(left_byte, right_byte) => {
+                                left_byte | right_byte
+                            }
+                            // Shorter is appended with 00 bytes that when or-ed produce the other bytestring
+                            itertools::EitherOrBoth::Left(byte)
+                            | itertools::EitherOrBoth::Right(byte) => *byte,
+                        })
+                        .collect_vec()
+                } else {
+                    bytes1
+                        .iter()
+                        .zip(bytes2)
+                        .map(|(b1, b2)| b1 | b2)
+                        .collect_vec()
+                };
+
+                Ok(Value::byte_string(bytes_result))
+            }
+            DefaultFunction::XorByteString => {
+                let should_pad = args[0].unwrap_bool()?;
+                let bytes1 = args[1].unwrap_byte_string()?;
+                let bytes2 = args[2].unwrap_byte_string()?;
+
+                let bytes_result = if *should_pad {
+                    bytes1
+                        .iter()
+                        .zip_longest(bytes2)
+                        .map(|b| match b {
+                            itertools::EitherOrBoth::Both(left_byte, right_byte) => {
+                                left_byte ^ right_byte
+                            }
+                            // Shorter is appended with 00 bytes that when xor-ed produce the other bytestring
+                            itertools::EitherOrBoth::Left(byte)
+                            | itertools::EitherOrBoth::Right(byte) => *byte,
+                        })
+                        .collect_vec()
+                } else {
+                    bytes1
+                        .iter()
+                        .zip(bytes2)
+                        .map(|(b1, b2)| b1 ^ b2)
+                        .collect_vec()
+                };
+
+                Ok(Value::byte_string(bytes_result))
+            }
+            DefaultFunction::ComplementByteString => {
+                let bytes = args[0].unwrap_byte_string()?;
+
+                let result = bytes.iter().map(|b| b ^ 255).collect_vec();
+
+                Ok(Value::byte_string(result))
+            }
+            DefaultFunction::ReadBit => {
+                let bytes = args[0].unwrap_byte_string()?;
+                let bit_index = args[1].unwrap_integer()?;
+
+                if bytes.is_empty() {
+                    return Err(Error::EmptyByteArray);
+                }
+
+                // This ensures there is at least one byte in bytes
+                if *bit_index < 0.into() || *bit_index >= (bytes.len() * 8).into() {
+                    return Err(Error::ReadBitOutOfBounds);
+                }
+
+                let (byte_index, bit_offset) = bit_index.div_rem(&8.into());
+
+                let bit_offset = usize::try_from(bit_offset).unwrap();
+
+                let flipped_index = bytes.len() - 1 - usize::try_from(byte_index).unwrap();
+
+                let byte = bytes[flipped_index];
+
+                let bit_test = (byte >> bit_offset) & 1 == 1;
+
+                Ok(Value::bool(bit_test))
+            }
+            DefaultFunction::WriteBits => {
+                let mut bytes = args[0].unwrap_byte_string()?.clone();
+                let indices = args[1].unwrap_int_list()?;
+                let set_bit = args[2].unwrap_bool()?;
+
+                for index in indices {
+                    let Constant::Integer(bit_index) = index else {
+                        unreachable!()
+                    };
+
+                    if *bit_index < 0.into() || *bit_index >= (bytes.len() * 8).into() {
+                        return Err(Error::WriteBitsOutOfBounds);
+                    }
+
+                    let (byte_index, bit_offset) = bit_index.div_rem(&8.into());
+
+                    let bit_offset = usize::try_from(bit_offset).unwrap();
+
+                    let flipped_index = bytes.len() - 1 - usize::try_from(byte_index).unwrap();
+
+                    let bit_mask: u8 = 1 << bit_offset;
+
+                    if *set_bit {
+                        bytes[flipped_index] |= bit_mask;
+                    } else {
+                        bytes[flipped_index] &= !bit_mask;
+                    }
+                }
+
+                Ok(Value::byte_string(bytes))
+            }
+            DefaultFunction::ReplicateByte => {
+                let size = args[0].unwrap_integer()?;
+                let byte = args[1].unwrap_integer()?;
+
+                // Safe since this is checked by cost model
+                let size = usize::try_from(size).unwrap();
+
+                let Ok(byte) = u8::try_from(byte) else {
+                    return Err(Error::OutsideByteBounds(byte.clone()));
+                };
+
+                let value = if size == 0 {
+                    Value::byte_string(vec![])
+                } else {
+                    Value::byte_string([byte].repeat(size))
+                };
+
+                Ok(value)
+            }
+            DefaultFunction::ShiftByteString => {
+                let bytes = args[0].unwrap_byte_string()?;
+                let shift = args[1].unwrap_integer()?;
+
+                let byte_length = bytes.len();
+
+                if BigInt::from_usize(byte_length).unwrap() * 8 <= shift.abs() {
+                    let new_vec = vec![0; byte_length];
+
+                    return Ok(Value::byte_string(new_vec));
+                }
+
+                let is_shl = shift >= &0.into();
+
+                let mut bv = BitVec::<u8, Msb0>::from_vec(bytes.clone());
+
+                if is_shl {
+                    bv.shift_left(usize::try_from(shift.abs()).unwrap());
+                } else {
+                    bv.shift_right(usize::try_from(shift.abs()).unwrap());
+                }
+
+                Ok(Value::byte_string(bv.into_vec()))
+            }
+            DefaultFunction::RotateByteString => {
+                let bytes = args[0].unwrap_byte_string()?;
+                let shift = args[1].unwrap_integer()?;
+
+                let byte_length = bytes.len();
+
+                if bytes.is_empty() {
+                    return Ok(Value::byte_string(bytes.clone()));
+                }
+
+                let shift = shift.mod_floor(&(byte_length * 8).into());
+
+                let mut bv = BitVec::<u8, Msb0>::from_vec(bytes.clone());
+
+                bv.rotate_left(usize::try_from(shift).unwrap());
+
+                Ok(Value::byte_string(bv.into_vec()))
+            }
+            DefaultFunction::CountSetBits => {
+                let bytes = args[0].unwrap_byte_string()?;
+
+                Ok(Value::integer(hamming::weight(bytes).into()))
+            }
+            DefaultFunction::FindFirstSetBit => {
+                let bytes = args[0].unwrap_byte_string()?;
+
+                let first_bit = bytes
+                    .iter()
+                    .rev()
+                    .enumerate()
+                    .find_map(|(byte_index, value)| {
+                        let value = value.reverse_bits();
+
+                        let first_bit: Option<usize> = if value >= 128 {
+                            Some(0)
+                        } else if value >= 64 {
+                            Some(1)
+                        } else if value >= 32 {
+                            Some(2)
+                        } else if value >= 16 {
+                            Some(3)
+                        } else if value >= 8 {
+                            Some(4)
+                        } else if value >= 4 {
+                            Some(5)
+                        } else if value >= 2 {
+                            Some(6)
+                        } else if value >= 1 {
+                            Some(7)
+                        } else {
+                            None
+                        };
+
+                        first_bit.map(|bit| isize::try_from(bit + byte_index * 8).unwrap())
+                    });
+
+                Ok(Value::integer(first_bit.unwrap_or(-1).into()))
+            }
+            DefaultFunction::Ripemd_160 => {
+                use cryptoxide::{digest::Digest, ripemd160::Ripemd160};
+
+                let arg1 = args[0].unwrap_byte_string()?;
+
+                let mut hasher = Ripemd160::new();
+
+                hasher.input(arg1);
+
+                let mut bytes = vec![0; hasher.output_bytes()];
+
+                hasher.result(&mut bytes);
+
+                let value = Value::byte_string(bytes);
+
+                Ok(value)
+            } // DefaultFunction::ExpModInteger => todo!(),
         }
     }
 }
@@ -1570,7 +1882,7 @@ pub static ANY_TAG: u64 = 102;
 
 #[cfg(not(target_family = "wasm"))]
 fn verify_ecdsa(public_key: &[u8], message: &[u8], signature: &[u8]) -> Result<Value, Error> {
-    use secp256k1::{ecdsa::Signature, Message, PublicKey, Secp256k1};
+    use secp256k1::{Message, PublicKey, Secp256k1, ecdsa::Signature};
 
     let secp = Secp256k1::verification_only();
 
@@ -1589,7 +1901,7 @@ fn verify_ecdsa(public_key: &[u8], message: &[u8], signature: &[u8]) -> Result<V
 /// The message needs to be 32 bytes (ideally prehashed, but not a requirement).
 #[cfg(not(target_family = "wasm"))]
 fn verify_schnorr(public_key: &[u8], message: &[u8], signature: &[u8]) -> Result<Value, Error> {
-    use secp256k1::{schnorr::Signature, Message, Secp256k1, XOnlyPublicKey};
+    use secp256k1::{Message, Secp256k1, XOnlyPublicKey, schnorr::Signature};
 
     let secp = Secp256k1::verification_only();
 

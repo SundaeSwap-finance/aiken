@@ -1,8 +1,8 @@
 use self::{environment::Environment, pretty::Printer};
 use crate::{
     ast::{
-        well_known, Annotation, DataType, DataTypeKey, DefinitionLocation, ModuleKind, Span,
-        TypedDataType,
+        Annotation, DataType, DataTypeKey, DefinitionLocation, ModuleKind, Span, TypedDataType,
+        well_known,
     },
     tipo::fields::FieldMap,
 };
@@ -26,6 +26,7 @@ pub use environment::collapse_links;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TypeAliasAnnotation {
+    pub module: Option<String>,
     pub alias: String,
     pub parameters: Vec<String>,
     pub annotation: Annotation,
@@ -211,8 +212,8 @@ impl Type {
         match self {
             Type::App { module, name, .. } => Some((module.to_string(), name.to_string())),
             Type::Fn { .. } => None,
-            Type::Var { ref tipo, .. } => match &*tipo.borrow() {
-                TypeVar::Link { ref tipo } => tipo.qualifier(),
+            Type::Var { tipo, .. } => match &*tipo.borrow() {
+                TypeVar::Link { tipo } => tipo.qualifier(),
                 _ => None,
             },
             Type::Tuple { .. } => Some((String::new(), "Tuple".to_string())),
@@ -719,7 +720,14 @@ pub fn get_arg_type_name(tipo: &Type) -> String {
             let inner_args = elems.iter().map(|arg| get_arg_type_name(arg)).collect_vec();
             inner_args.join("_")
         }
-        _ => unreachable!(),
+        Type::Pair { fst, snd, .. } => {
+            let inner_args = [fst, snd]
+                .iter()
+                .map(|arg| get_arg_type_name(arg))
+                .collect_vec();
+            inner_args.join("_")
+        }
+        _ => unreachable!("WTF {:#?}", tipo),
     }
 }
 
@@ -1101,11 +1109,13 @@ impl TypeVar {
             Self::Link { tipo } => tipo.get_inner_types(),
             Self::Unbound { .. } => vec![],
             var => {
-                vec![Type::Var {
-                    tipo: RefCell::new(var.clone()).into(),
-                    alias: None,
-                }
-                .into()]
+                vec![
+                    Type::Var {
+                        tipo: RefCell::new(var.clone()).into(),
+                        alias: None,
+                    }
+                    .into(),
+                ]
             }
         }
     }
@@ -1348,6 +1358,10 @@ impl TypeConstructor {
             module: "".to_string(),
             public: true,
         }
+    }
+
+    pub fn might_be(name: &str) -> bool {
+        name.chars().next().unwrap().is_uppercase()
     }
 }
 

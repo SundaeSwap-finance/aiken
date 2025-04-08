@@ -1,5 +1,151 @@
 # Changelog
 
+## v1.1.16 - unreleased
+
+### Added
+
+- **aiken**: Very simple support for monorepos via a `members` property in the
+  root `aiken.toml` file. Globs are supported you one could do this:
+
+  ```toml
+  members = ["pkgs/*"]
+  ```
+
+  @rvcas
+
+### Fixed
+
+- **aiken**: Summary should always print at the end of the output not just when
+  checks plus warnings is greater than zero. @rvcas
+
+- **aiken-lang**: Fix comments not being able to occur in ByteArray array
+  members. @rvcas
+
+- **uplc**: `find_script` now supports stake registrations certificates @mpizenberg
+
+## v1.1.14 - 2025-03-21
+
+### Added
+
+- **aiken**: New `-S` flag on `check` and `build` that blocks the printing of warnings but it still shows the total warning count. @rvcas
+- **aiken-lang**: Allow types to be used as namespaces for constructors. Importing each constructor variants independently is no longer required in neither pattern-matches nor value construction. One can simply use the type name as a prefix/namespace now. @KtorZ
+- **aiken-lang**: Allow capture on constructor calls. @KtorZ
+
+### Changed
+
+- **aiken-lang**: Prevent (type error) backpassing blocks with empty continuation. See [#1111](https://github.com/aiken-lang/aiken/issues/1111). @KtorZ
+- **aiken-lang**: Change default placeholder for `trace` to `Void` instead of `todo`. @KtorZ
+- **aiken-lang**: Disallow (parse error) dangling colon `:` in traces. See [#1113](https://github.com/aiken-lang/aiken/issues/1113). @KtorZ
+- **aiken-lang**: Fix `aiken blueprint apply` wrongly overriding all validators handlers names & ABI to the mint's one. See [#1099](https://github.com/aiken-lang/aiken/issues/1099). @KtorZ
+- **aiken-lang**: Always type-check trace label irrespective of the trace level, to avoid unnecessary warnings in compact or silent mode. See [#1122](https://github.com/aiken-lang/aiken/issues/1122). @KtorZ
+- **aiken-lang**: Formatter was removing comments from function type annotation args @rvcas
+- **aiken-lang**: Parser wrongly merged two adjacent sequences together, effectively fusioning scopes. @KtorZ
+- **aiken-lang**: Fix hint when suggesting to use named fields, wrongly suggesting args in lexicographical order instead of definition order. @KtorZ
+- **aiken-project**: Better errors on `blueprint apply` when matching multiple or no validators. See [#1127](https://github.com/aiken-lang/aiken/issues/1127) @KtorZ
+
+## v1.1.13 - 2025-02-26
+
+### Added
+
+- **aiken-lsp**: an additional code action to use constructors or identifiers from qualified imports is now offered on missing constructor or identifier. @KtorZ
+
+### Changed
+
+- **aiken**: Bumped pallas to 0.32.0
+- **aiken-project**: add back borders to the textplots @rvcas
+- **aiken-lang**: fixed `UnknownTypeConstructor` wrongly reported as `UnknownVariable` (then messing up with LSP quickfix suggestions). @KtorZ
+
+## v1.1.12 - 2025-02-18
+
+### Changed
+
+- **uplc**: `eval_phase_two` and related functions now return an EvalResult @Quantumplation
+
+  In order to allow consuming tools provide better tooling experiences, the various `eval_phase_two`
+  functions provide an `EvalResult`, which includes the final term, the remaining budget, and the traces.
+  This means you can display or work with the traces of a script even if it succeeds.
+
+## v1.1.11 - 2025-02-11
+
+### Added
+
+- **aiken**: New `aiken bench` command to run benchmarks. @Riley-Kilgore, @KtorZ
+
+  The command is very similar to `aiken check`, and will collect and run benchmarks found across the codebase. The output by default is a set of pretty terminal plots for each dimension (mem & cpu) for each test bench. The complete dataset of points can be obtained in a structured (JSON) format by redirecting the output to a file.
+
+- **aiken-lang**: New `bench` keyword and capabilities to the test framework. @Riley-Kilgore, @KtorZ
+
+  A `bench` is a new type of test that takes in a single `Sampler<a> = fn(Int) -> Fuzzer<a>` as parameter, similar to how property-based test receive `Fuzzer<a>`. A `Sampler` is in fact, a _scaled Fuzzer_ which receive a monotically increasing size as parameter. This allows fine-grained control over generated values. Unlike tests, benchmarks can return _anything_ since their output is ignored.
+
+  Read more about benchmarks in the [user manual](https://aiken-lang.org/language-tour/bench).
+
+### Changed
+
+- **aiken-lang**: The compiler now raises a warning when attempting to destructure a record constructor without using named fields. See [#1084](https://github.com/aiken-lang/aiken/issues/1084). @KtorZ
+- **aiken-lang**: Fix blueprint schema definitions related to pairs (no longer omit (sometimes) Pairs definitions, and generate them as data List). See [#1086](https://github.com/aiken-lang/aiken/issues/1086) and [#970](https://github.com/aiken-lang/aiken/issues/970). @KtorZ
+- **aiken-project**: Improve feedback returned when matching tests or modules. See [#1092](https://github.com/aiken-lang/aiken/issues/1092). @KtorZ
+- **aiken-project**: Disambiguate type-alias blueprint definition using module's name. See [#1074](https://github.com/aiken-lang/aiken/issues/1092). @KtorZ
+
+## v1.1.10 - 2025-01-21
+
+### Added
+
+- **aiken-project**: `export` output now supports the functions `return_type`. @rvcas
+- **aiken-lang**: `write_bits` can now be used from aiken/builtins. @Microproofs
+
+### Changed
+
+- **aiken-project**: The `aiken.toml` file no longer supports `v1` and `v2` for the plutus version field. @rvcas
+- **aiken-project**: `Error::TomlLoading` now looks much better - see [#1032](https://github.com/aiken-lang/aiken/issues/1032#issuecomment-2562122101). @rvcas
+- **aiken-lang**: 10-20% optimization improvements via case-constr, rearranging function definitions (while maintaining dependency ordering),
+  and allowing inlining in if_then_else_error cases which preserve the same error semantics for a program. @Microproofs
+
+### Fixed
+
+- **aiken**: panic error when using `aiken uplc decode` on cbor encoded flat bytes. @rvcas
+- **aiken-lang**: comment formatting in pipelines leading to confusion. @rvcas
+- **aiken-lang**: preserve holes discard name in function captures (see [#1080](https://github.com/aiken-lang/aiken/issues/1080)). @KtorZ
+- **uplc**: Added deserialization match for the new builtin indices.
+
+## v1.1.9 - 2024-12-13
+
+### Added
+
+- **aiken**: Generate a default _'placeholder.ak'_ validator when using `aiken new`. See [#1061](https://github.com/aiken-lang/aiken/pull/1061) @Waalge
+- **aiken-lang**: New builtins [`unconstr_fields`](https://aiken-lang.github.io/prelude/aiken/builtin.html#unconstr_fields) and [`unconstr_index`](https://aiken-lang.github.io/prelude/aiken/builtin.html#unconstr_index). @Microproofs
+- **aiken-lang**: Added builtins from Chang2 hardfork (except for writeBits). @Microproofs, @KtorZ
+  - [Bitwise operations](https://aiken-lang.github.io/prelude/aiken/builtin.html#Bitwise)
+  - [Ripemd-160 hashing](https://aiken-lang.github.io/prelude/aiken/builtin.html#ripemd_160)
+- **aiken-projects**: The generated documentation may now include maths typesetting rendered using [KaTex](https://katex.org/). See [#1070](https://github.com/aiken-lang/aiken/pull/1070) @adrian052.
+
+  - (Linux & MacOS only) Both inline (delimited by single `$` symbols) and blocks (delimited by doubled `$$` symbols) are now parsed and rendered as SVG upon generating documentation. For example:
+
+    ```
+    $$
+    g^{z} = g^{r +c \cdot x} = g^{r} g^{x \cdot c} = g^{r} (g^{x})^{c} = g^{r} u^{c}
+    $$
+    ```
+
+    will display:
+
+    $$
+    g^{z} = g^{r + c \cdot x} = g^{r} g^{x \cdot c} = g^{r} (g^{x})^{c} = g^{r} u^{c}
+    $$
+
+- **uplc**: New builtins from Chang2 hardfork added to the VM along with costing. @Hadelive, @Microproofs
+
+### Changed
+
+- **aiken**: Fix `aiken blueprint policy` computing hashes as PlutusV1, instead of relying on the plutus version from the Blueprint. @KtorZ
+- **uplc**: Parse tild in identifiers for UPLC nodes. @SupernaviX
+- **examples**: Update "Hello, World!" source code tutorial to match website, now using MeshJS. @jinglescode
+- **examples**: Update "Gift Card" source code tutorial to match website, now using Lucid-Evolution and Weld. @rvcas
+- **aiken-lang**: Fixed a code gen crash when using records in when is expressions. @Microproofs
+
+## v1.1.8
+
+- There's no v1.1.8. Nothing happened. Don't ask questions.
+
 ## v1.1.7 - 2024-11-19
 
 ### Changed
@@ -166,7 +312,7 @@
 - **aiken-lang**: rename some builtins. @KtorZ
 
   | old name           | new name    |
-  | ---                | ---         |
+  | ------------------ | ----------- |
   | `mk_nil_data`      | `new_list`  |
   | `mk_pair_data`     | `new_pair`  |
   | `mk_nil_pair_data` | `new_pairs` |
@@ -211,8 +357,8 @@
 
   3. Changes the behavior of the `--trace-level compact` mode to now:
 
-   - remove trace-if-false (`?` operator) traces entirely in this mode;
-   - only keep the label (first trace argument) and error when it isn't a string.
+  - remove trace-if-false (`?` operator) traces entirely in this mode;
+  - only keep the label (first trace argument) and error when it isn't a string.
 
   See also [#978](https://github.com/aiken-lang/aiken/pull/978).
 

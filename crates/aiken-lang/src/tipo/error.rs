@@ -1,6 +1,9 @@
 use super::Type;
 use crate::{
-    ast::{Annotation, BinOp, CallArg, LogicalOpChainKind, Span, UntypedFunction, UntypedPattern},
+    ast::{
+        Annotation, BinOp, CallArg, LogicalOpChainKind, Namespace, Span, UntypedFunction,
+        UntypedPattern,
+    },
     error::ExtraData,
     expr::{self, AssignmentPattern, UntypedAssignmentKind, UntypedExpr},
     format::Formatter,
@@ -317,6 +320,14 @@ You can use '{discard}' and numbers to distinguish between similar names.
         location: Span,
     },
 
+    #[error("I notice a benchmark definition without any argument.\n")]
+    #[diagnostic(url("https://aiken-lang.org/language-tour/bench"))]
+    #[diagnostic(code("arity::bench"))]
+    IncorrectBenchmarkArity {
+        #[label("must have exactly one argument")]
+        location: Span,
+    },
+
     #[error(
         "I saw {} field{} in a context where there should be {}.\n",
         given.if_supports_color(Stdout, |s| s.purple()),
@@ -387,7 +398,7 @@ From there, you can define 'increment', a function that takes a single argument 
         expected: usize,
         given: Vec<CallArg<UntypedPattern>>,
         name: String,
-        module: Option<String>,
+        module: Option<Namespace>,
         is_record: bool,
     },
 
@@ -710,7 +721,7 @@ Perhaps, try the following:
         label: String,
         name: String,
         args: Vec<CallArg<UntypedPattern>>,
-        module: Option<String>,
+        module: Option<Namespace>,
         spread_location: Option<Span>,
     },
 
@@ -797,7 +808,7 @@ Perhaps, try the following:
     },
 
     #[error(
-        "I looked for '{}' in '{}' but couldn't find it.\n",
+        "I looked for '{}' in module '{}' but couldn't find it.\n",
         name.if_supports_color(Stdout, |s| s.purple()),
         module_name.if_supports_color(Stdout, |s| s.purple())
     )]
@@ -811,7 +822,7 @@ Perhaps, try the following:
         )
     ))]
     UnknownModuleType {
-        #[label("unknown import")]
+        #[label("not exported?")]
         location: Span,
         name: String,
         module_name: String,
@@ -890,7 +901,7 @@ Perhaps, try the following:
     #[diagnostic(code("unknown::type_constructor"))]
     #[diagnostic(help(
         "{}",
-        suggest_neighbor(name, constructors.iter(), "Did you forget to import it?")
+        suggest_neighbor(name, constructors.iter(), &suggest_import_constructor())
     ))]
     UnknownTypeConstructor {
         #[label("unknown constructor")]
@@ -906,11 +917,7 @@ Perhaps, try the following:
         suggest_neighbor(
             name,
             variables.iter(),
-            &if name.chars().next().unwrap().is_uppercase() {
-                suggest_import_constructor()
-            } else {
-                "Did you forget to import it?".to_string()
-            }
+            "Did you forget to import it?",
         )
     ))]
     UnknownVariable {
@@ -1072,7 +1079,7 @@ The best thing to do from here is to remove it."#))]
         available_purposes: Vec<String>,
     },
 
-    #[error("I could not find an appropriate handler in the validator definition\n")]
+    #[error("I could not find an appropriate handler in the validator definition.\n")]
     #[diagnostic(code("unknown::handler"))]
     #[diagnostic(help(
         "When referring to a validator handler via record access, you must refer to one of the declared handlers{}{}",
@@ -1088,7 +1095,7 @@ The best thing to do from here is to remove it."#))]
         available_handlers: Vec<String>,
     },
 
-    #[error("I caught an extraneous fallback handler in an already exhaustive validator\n")]
+    #[error("I caught an extraneous fallback handler in an already exhaustive validator.\n")]
     #[diagnostic(code("extraneous::fallback"))]
     #[diagnostic(help(
         "Validator handlers must be exhaustive and either cover all purposes, or provide a fallback handler. Here, you have successfully covered all script purposes with your handler, but left an extraneous fallback branch. I cannot let that happen, but removing it for you would probably be deemed rude. So please, remove the fallback."
@@ -1096,6 +1103,16 @@ The best thing to do from here is to remove it."#))]
     UnexpectedValidatorFallback {
         #[label("redundant fallback handler")]
         fallback: Span,
+    },
+
+    #[error("I was stopped by a suspicious field access chain.\n")]
+    #[diagnostic(code("invalid::field_access"))]
+    #[diagnostic(help(
+        "It seems like you've got things mixed up a little here? You can only access fields exported by modules or, by types within those modules. Double-check the culprit field access chain, there's likely something wrong about it."
+    ))]
+    InvalidFieldAccess {
+        #[label("invalid field access")]
+        location: Span,
     },
 }
 
@@ -1158,7 +1175,9 @@ impl ExtraData for Error {
             | Error::UnknownPurpose { .. }
             | Error::UnknownValidatorHandler { .. }
             | Error::UnexpectedValidatorFallback { .. }
-            | Error::MustInferFirst { .. } => None,
+            | Error::IncorrectBenchmarkArity { .. }
+            | Error::MustInferFirst { .. }
+            | Error::InvalidFieldAccess { .. } => None,
 
             Error::UnknownType { name, .. }
             | Error::UnknownTypeConstructor { name, .. }
@@ -1269,7 +1288,7 @@ fn suggest_pattern(
     expected: usize,
     name: &str,
     given: &[CallArg<UntypedPattern>],
-    module: &Option<String>,
+    module: &Option<Namespace>,
     is_record: bool,
 ) -> Option<String> {
     if expected > given.len() {
@@ -1284,7 +1303,7 @@ fn suggest_pattern(
     }
 }
 
-fn suggest_generic(name: &String, expected: usize) -> String {
+fn suggest_generic(name: &str, expected: usize) -> String {
     if expected == 0 {
         return name.to_doc().to_pretty_string(70);
     }
@@ -1304,7 +1323,7 @@ fn suggest_generic(name: &String, expected: usize) -> String {
 fn suggest_constructor_pattern(
     name: &str,
     args: &[CallArg<UntypedPattern>],
-    module: &Option<String>,
+    module: &Option<Namespace>,
     spread_location: Option<Span>,
 ) -> String {
     let fixed_args = args
@@ -1452,6 +1471,21 @@ fn suggest_unify(
             expected,
             given
         },
+        Some(UnifyErrorSituation::SamplerAnnotationMismatch) => formatdoc! {
+            r#"While comparing the return annotation of a Sampler with its actual return type, I realized that both don't match.
+
+               I am inferring the Sampler should return:
+
+                   {}
+
+               but I found a conflicting annotation saying it returns:
+
+                   {}
+
+               Either, fix (or remove) the annotation or adjust the Sampler to return the expected type."#,
+            expected,
+            given
+        },
         None => formatdoc! {
             r#"I am inferring the following type:
 
@@ -1503,29 +1537,24 @@ fn suggest_import_constructor() -> String {
 
            Data-type constructors are not automatically imported, even if their type is imported. So, if a module 'aiken/pet' defines the following type:
 
-             ┍━ aiken/pet.ak ━━━━━━━━
-             │ {keyword_pub} {keyword_type} {type_Pet} {{
-             │   {variant_Cat}
-             │   {variant_Dog}
-             │ }}
+             ┍━ aiken/pet.ak ━    ==>   ┍━ foo.ak ━━━━━━━━━━━━━━━━
+             │ {keyword_pub} {keyword_type} {type_Pet} {{           │ {keyword_use} aiken/pet.{{{type_Pet}, {variant_Dog}}}
+             │   {variant_Cat}                    │
+             │   {variant_Dog}                    │ {keyword_fn} foo(pet: {type_Pet}) {{
+             │   {variant_Fox}                    │   {keyword_when} pet {keyword_is} {{
+             │ }}                        │     pet.{variant_Cat} -> // ...
+                                        │     {variant_Dog} -> // ...
+                                        │     {type_Pet}.{variant_Fox} -> // ...
+                                        │   }}
+                                        │ }}
 
-           You must import its constructors explicitly to use them, or prefix them with the module's name.
-
-             ┍━ foo.ak ━━━━━━━━
-             │ {keyword_use} aiken/pet.{{{type_Pet}, {variant_Dog}}}
-             │
-             │ {keyword_fn} foo(pet : {type_Pet}) {{
-             │   {keyword_when} pet {keyword_is} {{
-             │     pet.{variant_Cat} -> // ...
-             │     {variant_Dog} -> // ...
-             │   }}
-             │ }}
+           You must import its constructors explicitly to use them, or prefix them with the module or type's name.
         "#
         , keyword_fn =  "fn".if_supports_color(Stdout, |s| s.yellow())
         , keyword_is = "is".if_supports_color(Stdout, |s| s.yellow())
-        , keyword_pub = "pub".if_supports_color(Stdout, |s| s.bright_blue())
-        , keyword_type = "type".if_supports_color(Stdout, |s| s.bright_blue())
-        , keyword_use = "use".if_supports_color(Stdout, |s| s.bright_blue())
+        , keyword_pub = "pub".if_supports_color(Stdout, |s| s.bright_purple())
+        , keyword_type = "type".if_supports_color(Stdout, |s| s.purple())
+        , keyword_use = "use".if_supports_color(Stdout, |s| s.bright_purple())
         , keyword_when = "when".if_supports_color(Stdout, |s| s.yellow())
         , type_Pet = "Pet"
             .if_supports_color(Stdout, |s| s.bright_blue())
@@ -1534,6 +1563,9 @@ fn suggest_import_constructor() -> String {
             .if_supports_color(Stdout, |s| s.bright_blue())
             .if_supports_color(Stdout, |s| s.bold())
         , variant_Dog = "Dog"
+            .if_supports_color(Stdout, |s| s.bright_blue())
+            .if_supports_color(Stdout, |s| s.bold())
+        , variant_Fox = "Fox"
             .if_supports_color(Stdout, |s| s.bright_blue())
             .if_supports_color(Stdout, |s| s.bold())
     }
@@ -1630,9 +1662,7 @@ pub enum Warning {
         "I discovered an unused constructor: {}",
         name.if_supports_color(Stderr, |s| s.default_color())
     )]
-    #[diagnostic(help(
-        "No big deal, but you might want to remove it to get rid of that warning."
-    ))]
+    #[diagnostic(help("No big deal, but you might want to remove it to get rid of that warning."))]
     #[diagnostic(code("unused::constructor"))]
     UnusedConstructor {
         #[label("unused constructor")]
@@ -1644,9 +1674,7 @@ pub enum Warning {
         "I discovered an unused imported module: {}",
         name.if_supports_color(Stderr, |s| s.default_color()),
     )]
-    #[diagnostic(help(
-        "No big deal, but you might want to remove it to get rid of that warning."
-    ))]
+    #[diagnostic(help("No big deal, but you might want to remove it to get rid of that warning."))]
     #[diagnostic(code("unused::import::module"))]
     UnusedImportedModule {
         #[label("unused module")]
@@ -1658,9 +1686,7 @@ pub enum Warning {
         "I discovered an unused imported value: {}",
         name.if_supports_color(Stderr, |s| s.default_color()),
     )]
-    #[diagnostic(help(
-        "No big deal, but you might want to remove it to get rid of that warning."
-    ))]
+    #[diagnostic(help("No big deal, but you might want to remove it to get rid of that warning."))]
     #[diagnostic(code("unused:import::value"))]
     UnusedImportedValueOrType {
         #[label("unused import")]
@@ -1823,6 +1849,27 @@ pub enum Warning {
         location: Span,
         value: String,
     },
+
+    #[error("I tripped over a confusing constructor destructuring")]
+    #[diagnostic(help("Try instead: \n\n{}", format_pattern_suggestion(suggestion)))]
+    #[diagnostic(code("syntax::unused_record_fields"))]
+    #[diagnostic(url("https://aiken-lang.org/language-tour/custom-types#destructuring"))]
+    UnusedRecordFields {
+        #[label("prefer destructuring with named fields")]
+        location: Span,
+        suggestion: UntypedPattern,
+    },
+
+    #[error("I noticed a (compact) dynamic trace label which is not a string")]
+    #[diagnostic(help(
+        "Compiling with a compact trace-level, you are probably expecting compact traces although here, the entire label will need to be serialise *at runtime* which will add a significant overhead.\n\nAs a reminder, trace arguments are fully ignored in compact tracing. Hence, you probably want to put a cute little label here and move the current trace as argument!"
+    ))]
+    #[diagnostic(code("trace::label_is_not_string"))]
+    #[diagnostic(url("https://aiken-lang.org/language-tour/troubleshooting#traces"))]
+    CompactTraceLabelIsNotstring {
+        #[label("compact trace label is not String")]
+        location: Span,
+    },
 }
 
 impl ExtraData for Warning {
@@ -1842,6 +1889,7 @@ impl ExtraData for Warning {
             | Warning::UnusedVariable { .. }
             | Warning::DiscardedLetAssignment { .. }
             | Warning::ValidatorInLibraryModule { .. }
+            | Warning::CompactTraceLabelIsNotstring { .. }
             | Warning::UseWhenInstead { .. } => None,
             Warning::Utf8ByteArrayIsValidHexString { value, .. } => Some(value.clone()),
             Warning::UnusedImportedModule { location, .. } => {
@@ -1849,6 +1897,10 @@ impl ExtraData for Warning {
             }
             Warning::UnusedImportedValueOrType { location, .. } => {
                 Some(format!("{},{}", true, location.start))
+            }
+
+            Warning::UnusedRecordFields { suggestion, .. } => {
+                Some(Formatter::new().pattern(suggestion).to_pretty_string(80))
             }
         }
     }
@@ -1869,6 +1921,8 @@ pub enum UnifyErrorSituation {
     Operator(BinOp),
 
     FuzzerAnnotationMismatch,
+
+    SamplerAnnotationMismatch,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1880,6 +1934,23 @@ pub enum UnknownRecordFieldSituation {
 pub fn format_suggestion(sample: &UntypedExpr) -> String {
     Formatter::new()
         .expr(sample, false)
+        .to_pretty_string(70)
+        .lines()
+        .enumerate()
+        .map(|(ix, line)| {
+            if ix == 0 {
+                format!("╰─▶ {line}")
+            } else {
+                format!("    {line}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub fn format_pattern_suggestion(sample: &UntypedPattern) -> String {
+    Formatter::new()
+        .pattern(sample)
         .to_pretty_string(70)
         .lines()
         .enumerate()

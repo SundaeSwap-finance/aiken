@@ -9,6 +9,7 @@ pub const CONSTR_FIELDS_EXPOSER: &str = "__constr_fields_exposer";
 pub const CONSTR_INDEX_EXPOSER: &str = "__constr_index_exposer";
 pub const EXPECT_ON_LIST: &str = "__expect_on_list";
 pub const INNER_EXPECT_ON_LIST: &str = "__inner_expect_on_list";
+pub const INDICES_CONVERTER: &str = "__indices_converter";
 
 impl<T> Term<T>
 where
@@ -28,6 +29,17 @@ where
 
     pub fn delay(self) -> Self {
         Term::Delay(self.into())
+    }
+
+    pub fn constr(tag: usize, fields: Vec<Term<T>>) -> Self {
+        Term::Constr { tag, fields }
+    }
+
+    pub fn case(self, branches: Vec<Term<T>>) -> Self {
+        Term::Case {
+            constr: self.into(),
+            branches,
+        }
     }
 
     // Primitives
@@ -69,6 +81,10 @@ where
 
     pub fn list_values(vals: Vec<Constant>) -> Self {
         Term::Constant(Constant::ProtoList(Type::Data, vals).into())
+    }
+
+    pub fn int_values(vals: Vec<Constant>) -> Self {
+        Term::Constant(Constant::ProtoList(Type::Integer, vals).into())
     }
 
     pub fn empty_map() -> Self {
@@ -392,6 +408,10 @@ where
     pub fn serialise_data() -> Self {
         Term::Builtin(DefaultFunction::SerialiseData)
     }
+
+    pub fn write_bits() -> Self {
+        Term::Builtin(DefaultFunction::WriteBits)
+    }
 }
 
 impl<T> Term<T>
@@ -533,6 +553,33 @@ impl Term<Name> {
                 .apply(Term::unconstr_data().apply(Term::var("__constr_var")))
                 .lambda("__constr_var"),
         )
+    }
+
+    pub fn data_list_to_integer_list(self) -> Self {
+        self.lambda(INDICES_CONVERTER)
+            .apply(Term::var(INDICES_CONVERTER).apply(Term::var(INDICES_CONVERTER)))
+            .lambda(INDICES_CONVERTER)
+            .apply(
+                Term::var("xs")
+                    .delayed_choose_list(
+                        Term::int_values(vec![]),
+                        Term::mk_cons()
+                            .apply(Term::var("x"))
+                            .apply(
+                                Term::var(INDICES_CONVERTER)
+                                    .apply(Term::var(INDICES_CONVERTER))
+                                    .apply(Term::var("rest")),
+                            )
+                            .lambda("rest")
+                            .apply(Term::tail_list().apply(Term::var("xs")))
+                            .lambda("x")
+                            .apply(
+                                Term::un_i_data().apply(Term::head_list().apply(Term::var("xs"))),
+                            ),
+                    )
+                    .lambda("xs")
+                    .lambda(INDICES_CONVERTER),
+            )
     }
 
     /// Introduce a let-binding for a given term. The callback receives a Term::Var
@@ -752,7 +799,7 @@ mod tests {
     use crate::{
         ast::{Data, Name, NamedDeBruijn, Program, Term},
         builder::Constant,
-        machine::{cost_model::ExBudget, Error},
+        machine::{Error, cost_model::ExBudget},
         optimize::interner::CodeGenInterner,
     };
 

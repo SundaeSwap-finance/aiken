@@ -1,27 +1,26 @@
 [package]
 name = "aiken-project"
-description = "Aiken project utilities"
-version = "1.1.7"
-edition = "2021"
-repository = "https://github.com/aiken-lang/aiken"
-homepage = "https://github.com/aiken-lang/aiken"
-license = "Apache-2.0"
-authors = [
-    "Lucas Rosa <x@rvcas.dev>",
-    "Kasey White <kwhitemsg@gmail.com>",
-    "KtorZ <matthias.benkort@gmail.com>",
-]
-rust-version = "1.70.0"
+version.workspace = true
+edition.workspace = true
+description.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+rust-version.workspace = true
+
 build = "build.rs"
 
 [dependencies]
-aiken-lang = { path = "../aiken-lang", version = "1.1.7" }
+aiken-lang = { path = "../aiken-lang", version = "1.1.15" }
 askama = { version = "0.12.0", features = ["urlencode"] }
 camino = "1.1.9"
 ciborium = "0.2.2"
 dirs = "4.0.0"
 fslock = "0.2.1"
 futures = "0.3.26"
+glob = "0.3.2"
 hex = "0.4.3"
 ignore = "0.4.20"
 indexmap = "1.9.2"
@@ -42,17 +41,22 @@ pulldown-cmark = { version = "0.12.0", default-features = false, features = [
 rayon = "1.7.0"
 regex = "1.7.1"
 reqwest = { version = "0.11.14", features = ["blocking", "json"] }
+rgb = "0.8.50"
 semver = { version = "1.0.23", features = ["serde"] }
 serde = { version = "1.0.152", features = ["derive"] }
 serde_json = { version = "1.0.94", features = ["preserve_order"] }
 strip-ansi-escapes = "0.1.1"
+textplots = "0.8.7"
 thiserror = "1.0.39"
 tokio = { version = "1.26.0", features = ["full"] }
 toml = "0.7.2"
-uplc = { path = '../uplc', version = "1.1.7" }
+uplc = { path = '../uplc', version = "1.1.15" }
 vec1 = "1.10.1"
 walkdir.workspace = true
 zip = "0.6.4"
+
+[target.'cfg(not(windows))'.dependencies]
+katex = "0.4"
 
 [dev-dependencies]
 blst = "0.3.11"

@@ -2,10 +2,11 @@ use aiken_project::{config, pretty};
 #[cfg(not(target_os = "windows"))]
 use cmd::completion;
 use cmd::{
+    Cmd, benchmark,
     blueprint::{self, address},
     build, check, docs, export, fmt, lsp, new,
     packages::{self, add},
-    tx, uplc, Cmd,
+    tx, uplc,
 };
 use owo_colors::OwoColorize;
 
@@ -23,6 +24,7 @@ fn main() -> miette::Result<()> {
         Cmd::Build(args) => build::exec(args),
         Cmd::Address(args) => address::exec(args),
         Cmd::Check(args) => check::exec(args),
+        Cmd::Bench(args) => benchmark::exec(args),
         Cmd::Docs(args) => docs::exec(args),
         Cmd::Add(args) => add::exec(args),
         Cmd::Blueprint(args) => blueprint::exec(args),

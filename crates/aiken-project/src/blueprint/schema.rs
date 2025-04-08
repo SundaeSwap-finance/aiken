@@ -1,10 +1,10 @@
 use crate::{
-    blueprint::definitions::{Definitions, Reference},
     CheckedModule,
+    blueprint::definitions::{Definitions, Reference},
 };
 use aiken_lang::{
     ast::{Definition, TypedDataType, TypedDefinition},
-    tipo::{pretty, Type, TypeVar},
+    tipo::{Type, TypeVar, pretty},
 };
 use owo_colors::{OwoColorize, Stream::Stdout};
 use serde::{
@@ -95,6 +95,48 @@ pub enum Schema {
     Pair(Declaration<Schema>, Declaration<Schema>),
     List(Items<Schema>),
     Data(Data),
+}
+
+impl Schema {
+    pub fn void() -> Self {
+        Schema::Data(Data::AnyOf(vec![Annotated {
+            title: None,
+            description: None,
+            annotated: Constructor {
+                index: 0,
+                fields: vec![],
+            },
+        }]))
+    }
+
+    pub fn int() -> Self {
+        Schema::Data(Data::Integer)
+    }
+
+    pub fn bytes() -> Self {
+        Schema::Data(Data::Bytes)
+    }
+
+    pub fn bool() -> Self {
+        Schema::Data(Data::AnyOf(vec![
+            Annotated {
+                title: Some("False".to_string()),
+                description: None,
+                annotated: Constructor {
+                    index: 0,
+                    fields: vec![],
+                },
+            },
+            Annotated {
+                title: Some("True".to_string()),
+                description: None,
+                annotated: Constructor {
+                    index: 1,
+                    fields: vec![],
+                },
+            },
+        ]))
+    }
 }
 
 /// A schema for Plutus' Data.
@@ -205,46 +247,22 @@ impl Annotated<Schema> {
                             annotated: Schema::Data(Data::Opaque),
                         }),
 
-                        "ByteArray" => Ok(with_title(title.as_ref(), Schema::Data(Data::Bytes))),
+                        "ByteArray" => Ok(with_title(title.as_ref(), Schema::bytes())),
 
-                        "Int" => Ok(with_title(title.as_ref(), Schema::Data(Data::Integer))),
+                        "Int" => Ok(with_title(title.as_ref(), Schema::int())),
 
                         "String" => Ok(with_title(title.as_ref(), Schema::String)),
 
                         "Void" => Ok(Annotated {
                             title: title.or(Some("Unit".to_string())),
                             description: None,
-                            annotated: Schema::Data(Data::AnyOf(vec![Annotated {
-                                title: None,
-                                description: None,
-                                annotated: Constructor {
-                                    index: 0,
-                                    fields: vec![],
-                                },
-                            }])),
+                            annotated: Schema::void(),
                         }),
 
                         "Bool" => Ok(Annotated {
                             title: title.or(Some("Bool".to_string())),
                             description: None,
-                            annotated: Schema::Data(Data::AnyOf(vec![
-                                Annotated {
-                                    title: Some("False".to_string()),
-                                    description: None,
-                                    annotated: Constructor {
-                                        index: 0,
-                                        fields: vec![],
-                                    },
-                                },
-                                Annotated {
-                                    title: Some("True".to_string()),
-                                    description: None,
-                                    annotated: Constructor {
-                                        index: 1,
-                                        fields: vec![],
-                                    },
-                                },
-                            ])),
+                            annotated: Schema::bool(),
                         }),
 
                         "Ordering" => Ok(Annotated {
@@ -346,8 +364,6 @@ impl Annotated<Schema> {
                                     annotated: Schema::Pair(left, right),
                                     ..
                                 }) => {
-                                    definitions.remove(&generic);
-
                                     let left = left.map(|inner| match inner {
                                         Schema::Data(data) => data,
                                         _ => panic!("impossible: left inhabitant of pair isn't Data but: {inner:#?}"),
@@ -540,6 +556,7 @@ fn find_data_type(name: &str, definitions: &[TypedDefinition]) -> Option<TypedDa
             | Definition::TypeAlias { .. }
             | Definition::Use { .. }
             | Definition::ModuleConstant { .. }
+            | Definition::Benchmark { .. }
             | Definition::Test { .. } => continue,
         }
     }
@@ -1100,7 +1117,7 @@ Here's the types I followed and that led me to this problem:
 pub mod tests {
     use super::*;
     use proptest::prelude::*;
-    use serde_json::{self, json, Value};
+    use serde_json::{self, Value, json};
 
     pub fn assert_json(schema: &impl Serialize, expected: Value) {
         assert_eq!(serde_json::to_value(schema).unwrap(), expected);
@@ -1181,11 +1198,13 @@ pub mod tests {
 
     #[test]
     fn serialize_data_constr_1() {
-        let schema = Schema::Data(Data::AnyOf(vec![Constructor {
-            index: 0,
-            fields: vec![],
-        }
-        .into()]));
+        let schema = Schema::Data(Data::AnyOf(vec![
+            Constructor {
+                index: 0,
+                fields: vec![],
+            }
+            .into(),
+        ]));
         assert_json(
             &schema,
             json!({
@@ -1346,14 +1365,16 @@ pub mod tests {
     #[test]
     fn deserialize_any_of() {
         assert_eq!(
-            Data::AnyOf(vec![Constructor {
-                index: 0,
-                fields: vec![
-                    Declaration::Referenced(Reference::new("foo")).into(),
-                    Declaration::Referenced(Reference::new("bar")).into()
-                ],
-            }
-            .into()]),
+            Data::AnyOf(vec![
+                Constructor {
+                    index: 0,
+                    fields: vec![
+                        Declaration::Referenced(Reference::new("foo")).into(),
+                        Declaration::Referenced(Reference::new("bar")).into()
+                    ],
+                }
+                .into()
+            ]),
             serde_json::from_value(json!({
                 "anyOf": [{
                     "index": 0,
@@ -1374,14 +1395,16 @@ pub mod tests {
     #[test]
     fn deserialize_one_of() {
         assert_eq!(
-            Data::AnyOf(vec![Constructor {
-                index: 0,
-                fields: vec![
-                    Declaration::Referenced(Reference::new("foo")).into(),
-                    Declaration::Referenced(Reference::new("bar")).into()
-                ],
-            }
-            .into()]),
+            Data::AnyOf(vec![
+                Constructor {
+                    index: 0,
+                    fields: vec![
+                        Declaration::Referenced(Reference::new("foo")).into(),
+                        Declaration::Referenced(Reference::new("bar")).into()
+                    ],
+                }
+                .into()
+            ]),
             serde_json::from_value(json!({
                 "oneOf": [{
                     "index": 0,

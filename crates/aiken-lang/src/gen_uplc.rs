@@ -8,13 +8,14 @@ pub mod tree;
 use self::{
     air::Air,
     builder::{
+        AssignmentProperties, CodeGenSpecialFuncs, CycleFunctionNames, HoistableFunction, Variant,
         cast_validator_args, convert_type_to_data, extract_constant, modify_cyclic_calls,
-        modify_self_calls, AssignmentProperties, CodeGenSpecialFuncs, CycleFunctionNames,
-        HoistableFunction, Variant,
+        modify_self_calls,
     },
     tree::{AirTree, TreePath},
 };
 use crate::{
+    IdGenerator,
     ast::{
         AssignmentKind, BinOp, Bls12_381Point, Curve, DataTypeKey, FunctionAccessKey, Pattern,
         Span, TraceLevel, Tracing, TypedArg, TypedDataType, TypedFunction, TypedPattern,
@@ -25,31 +26,29 @@ use crate::{
     gen_uplc::{
         air::ExpectLevel,
         builder::{
-            erase_opaque_type_operations, get_generic_variant_name, get_line_columns_by_span,
-            get_src_code_by_span, known_data_to_type, monomorphize, wrap_validator_condition,
-            CodeGenFunction,
+            CodeGenFunction, erase_opaque_type_operations, get_generic_variant_name,
+            get_line_columns_by_span, get_src_code_by_span, known_data_to_type, monomorphize,
+            wrap_validator_condition,
         },
     },
     line_numbers::LineNumbers,
     plutus_version::PlutusVersion,
     tipo::{
-        check_replaceable_opaque_type, convert_opaque_type, find_and_replace_generics,
-        get_arg_type_name, get_generic_id_and_type, lookup_data_type_by_tipo,
         ModuleValueConstructor, PatternConstructor, Type, TypeInfo, ValueConstructor,
-        ValueConstructorVariant,
+        ValueConstructorVariant, check_replaceable_opaque_type, convert_opaque_type,
+        find_and_replace_generics, get_arg_type_name, get_generic_id_and_type,
+        lookup_data_type_by_tipo,
     },
-    IdGenerator,
 };
 use builder::{
-    introduce_name, introduce_pattern, pop_pattern, softcast_data_to_type_otherwise,
-    unknown_data_to_type, DISCARDED,
+    DISCARDED, introduce_name, introduce_pattern, pop_pattern, softcast_data_to_type_otherwise,
+    unknown_data_to_type,
 };
-
-use decision_tree::{get_tipo_by_path, Assigned, CaseTest, DecisionTree, TreeGen};
+use decision_tree::{Assigned, CaseTest, DecisionTree, TreeGen, get_tipo_by_path};
 use indexmap::IndexMap;
 use interner::AirInterner;
 use itertools::Itertools;
-use petgraph::{algo, Graph};
+use petgraph::{Graph, algo};
 use std::{collections::HashMap, rc::Rc};
 use stick_break_set::{Builtins, TreeSet};
 use tree::Fields;
@@ -361,7 +360,15 @@ impl<'a> CodeGenerator<'a> {
                     constructor, name, ..
                 } => match constructor.variant {
                     ValueConstructorVariant::LocalVariable { .. } => {
-                        AirTree::var(constructor.clone(), self.interner.lookup_interned(name), "")
+                        if name != CONSTR_INDEX_EXPOSER && name != CONSTR_FIELDS_EXPOSER {
+                            AirTree::var(
+                                constructor.clone(),
+                                self.interner.lookup_interned(name),
+                                "",
+                            )
+                        } else {
+                            AirTree::var(constructor.clone(), name, "")
+                        }
                     }
                     _ => AirTree::var(constructor.clone(), name, ""),
                 },
@@ -2480,7 +2487,7 @@ impl<'a> CodeGenerator<'a> {
 
                 let last_clause = if data_type
                     .as_ref()
-                    .map_or(true, |d| d.constructors.len() != cases.len())
+                    .is_none_or(|d| d.constructors.len() != cases.len())
                 {
                     *default.unwrap()
                 } else {
@@ -2529,16 +2536,7 @@ impl<'a> CodeGenerator<'a> {
                     clauses,
                 );
 
-                builtins_to_add.produce_air(
-                    // The only reason I pass this in is to ensure I signal
-                    // whether or not constr_fields_exposer was used. I could
-                    // probably optimize this part out to simplify codegen in
-                    // the future
-                    &mut self.special_functions,
-                    prev_subject_name,
-                    prev_tipo,
-                    when_air_clauses,
-                )
+                builtins_to_add.produce_air(prev_subject_name, prev_tipo, when_air_clauses)
             }
             DecisionTree::ListSwitch {
                 path,
@@ -2722,16 +2720,7 @@ impl<'a> CodeGenerator<'a> {
                     list_clauses.1,
                 );
 
-                builtins_to_add.produce_air(
-                    // The only reason I pass this in is to ensure I signal
-                    // whether or not constr_fields_exposer was used. I could
-                    // probably optimize this part out to simplify codegen in
-                    // the future
-                    &mut self.special_functions,
-                    prev_subject_name,
-                    prev_tipo,
-                    when_list_cases,
-                )
+                builtins_to_add.produce_air(prev_subject_name, prev_tipo, when_list_cases)
             }
             DecisionTree::HoistedLeaf(name, args) => {
                 let air_args = args
@@ -2758,7 +2747,7 @@ impl<'a> CodeGenerator<'a> {
                     air_args.into_iter().map(|i| i.1).collect_vec(),
                 );
 
-                self.handle_assigns(subject_name, subject_tipo, &args, &mut stick_set, then)
+                handle_assigns(subject_name, subject_tipo, &args, &mut stick_set, then)
             }
             DecisionTree::HoistThen {
                 name,
@@ -2793,62 +2782,6 @@ impl<'a> CodeGenerator<'a> {
                 });
 
                 assign
-            }
-        }
-    }
-
-    fn handle_assigns(
-        &mut self,
-        subject_name: &String,
-        subject_tipo: Rc<Type>,
-        assigns: &[Assigned],
-        stick_set: &mut TreeSet,
-        then: AirTree,
-    ) -> AirTree {
-        match assigns {
-            [] => then,
-            [assign, rest @ ..] => {
-                let Assigned { path, assigned } = assign;
-
-                let current_tipo = get_tipo_by_path(subject_tipo.clone(), path);
-                let builtins_path = Builtins::new_from_path(subject_tipo.clone(), path.clone());
-                let current_subject_name = if builtins_path.is_empty() {
-                    subject_name.clone()
-                } else {
-                    format!("{}_{}", subject_name, builtins_path)
-                };
-
-                // Transition process from previous to current
-                let builtins_to_add = stick_set.diff_union_builtins(builtins_path.clone());
-
-                // Previous path to apply the transition process too
-                let prev_builtins = Builtins {
-                    vec: builtins_path.vec[0..(builtins_path.len() - builtins_to_add.len())]
-                        .to_vec(),
-                };
-
-                let prev_subject_name = if prev_builtins.is_empty() {
-                    subject_name.clone()
-                } else {
-                    format!("{}_{}", subject_name, prev_builtins)
-                };
-                let prev_tipo = prev_builtins
-                    .vec
-                    .last()
-                    .map_or(subject_tipo.clone(), |last| last.tipo());
-
-                let assignment = AirTree::let_assignment(
-                    assigned,
-                    AirTree::local_var(current_subject_name, current_tipo),
-                    self.handle_assigns(subject_name, subject_tipo, rest, stick_set, then),
-                );
-
-                builtins_to_add.produce_air(
-                    &mut self.special_functions,
-                    prev_subject_name,
-                    prev_tipo,
-                    assignment,
-                )
             }
         }
     }
@@ -3805,10 +3738,7 @@ impl<'a> CodeGenerator<'a> {
 
                     value = self.hoist_functions_to_validator(value);
 
-                    let term = self
-                        .uplc_code_gen(value.to_vec())
-                        .constr_fields_exposer()
-                        .constr_index_exposer();
+                    let term = self.uplc_code_gen(value.to_vec());
 
                     let mut program =
                         self.new_program(self.special_functions.apply_used_functions(term));
@@ -3818,7 +3748,7 @@ impl<'a> CodeGenerator<'a> {
                     interner.program(&mut program);
 
                     let eval_program: Program<NamedDeBruijn> =
-                        program.clean_up().try_into().unwrap();
+                        program.clean_up_no_inlines().try_into().unwrap();
 
                     Some(
                         eval_program
@@ -3928,7 +3858,7 @@ impl<'a> CodeGenerator<'a> {
                             interner.program(&mut program);
 
                             let eval_program: Program<NamedDeBruijn> =
-                                program.clean_up().try_into().unwrap();
+                                program.clean_up_no_inlines().try_into().unwrap();
 
                             let evaluated_term: Term<NamedDeBruijn> = eval_program
                                 .eval(ExBudget::default())
@@ -4134,7 +4064,7 @@ impl<'a> CodeGenerator<'a> {
                 } else {
                     let term = arg_stack.pop().unwrap();
 
-                    match term.pierce_no_inlines() {
+                    match term.pierce_no_inlines_ref() {
                         Term::Var(_) => Some(term.force()),
                         Term::Delay(inner_term) => Some(inner_term.as_ref().clone()),
                         Term::Apply { .. } => Some(term.force()),
@@ -4462,7 +4392,7 @@ impl<'a> CodeGenerator<'a> {
                     known_data_to_type(term, &tipo)
                 };
 
-                if extract_constant(term.pierce_no_inlines()).is_some() {
+                if extract_constant(term.pierce_no_inlines_ref()).is_some() {
                     let mut program = self.new_program(term);
 
                     let mut interner = CodeGenInterner::new();
@@ -4470,7 +4400,7 @@ impl<'a> CodeGenerator<'a> {
                     interner.program(&mut program);
 
                     let eval_program: Program<NamedDeBruijn> =
-                        program.clean_up().try_into().unwrap();
+                        program.clean_up_no_inlines().try_into().unwrap();
 
                     let evaluated_term: Term<NamedDeBruijn> = eval_program
                         .eval(ExBudget::default())
@@ -4485,7 +4415,7 @@ impl<'a> CodeGenerator<'a> {
             Air::CastToData { tipo } => {
                 let mut term = arg_stack.pop().unwrap();
 
-                if extract_constant(term.pierce_no_inlines()).is_some() {
+                if extract_constant(term.pierce_no_inlines_ref()).is_some() {
                     term = builder::convert_type_to_data(term, &tipo);
 
                     let mut program = self.new_program(term);
@@ -4495,7 +4425,7 @@ impl<'a> CodeGenerator<'a> {
                     interner.program(&mut program);
 
                     let eval_program: Program<NamedDeBruijn> =
-                        program.clean_up().try_into().unwrap();
+                        program.clean_up_no_inlines().try_into().unwrap();
 
                     let evaluated_term: Term<NamedDeBruijn> = eval_program
                         .eval(ExBudget::default())
@@ -4548,11 +4478,7 @@ impl<'a> CodeGenerator<'a> {
 
                     Some(UplcType::Data) => subject,
 
-                    None => Term::var(
-                        self.special_functions
-                            .use_function_uplc(CONSTR_INDEX_EXPOSER.to_string()),
-                    )
-                    .apply(subject),
+                    None => Term::var(CONSTR_INDEX_EXPOSER).apply(subject),
                 };
 
                 let mut term = arg_stack.pop().unwrap();
@@ -4778,13 +4704,9 @@ impl<'a> CodeGenerator<'a> {
                         Some(UplcType::Bls12_381G2Element) => Term::bls12_381_g2_equal()
                             .apply(checker)
                             .apply(Term::var(subject_name)),
-                        None => Term::equals_integer().apply(checker).apply(
-                            Term::var(
-                                self.special_functions
-                                    .use_function_uplc(CONSTR_INDEX_EXPOSER.to_string()),
-                            )
-                            .apply(Term::var(subject_name)),
-                        ),
+                        None => Term::equals_integer()
+                            .apply(checker)
+                            .apply(Term::var(CONSTR_INDEX_EXPOSER).apply(Term::var(subject_name))),
                     };
 
                     Some(condition.if_then_else(then.delay(), term).force())
@@ -4906,7 +4828,7 @@ impl<'a> CodeGenerator<'a> {
                     .apply(term);
 
                 if arg_vec.iter().all(|item| {
-                    let maybe_const = extract_constant(item.pierce_no_inlines());
+                    let maybe_const = extract_constant(item.pierce_no_inlines_ref());
                     maybe_const.is_some()
                 }) {
                     let mut program = self.new_program(term);
@@ -4916,7 +4838,7 @@ impl<'a> CodeGenerator<'a> {
                     interner.program(&mut program);
 
                     let eval_program: Program<NamedDeBruijn> =
-                        program.clean_up().try_into().unwrap();
+                        program.clean_up_no_inlines().try_into().unwrap();
 
                     let evaluated_term: Term<NamedDeBruijn> = eval_program
                         .eval(ExBudget::default())
@@ -4971,13 +4893,7 @@ impl<'a> CodeGenerator<'a> {
                         otherwise,
                     );
 
-                    term = term.apply(
-                        Term::var(
-                            self.special_functions
-                                .use_function_uplc(CONSTR_FIELDS_EXPOSER.to_string()),
-                        )
-                        .apply(value),
-                    );
+                    term = term.apply(Term::var(CONSTR_FIELDS_EXPOSER).apply(value));
 
                     Some(term)
                 } else {
@@ -4990,13 +4906,10 @@ impl<'a> CodeGenerator<'a> {
                 let mut term = arg_stack.pop().unwrap();
                 let otherwise = arg_stack.pop().unwrap();
 
-                term = Term::var(
-                    self.special_functions
-                        .use_function_uplc(CONSTR_FIELDS_EXPOSER.to_string()),
-                )
-                .apply(value)
-                .choose_list(term.delay(), otherwise)
-                .force();
+                term = Term::var(CONSTR_FIELDS_EXPOSER)
+                    .apply(value)
+                    .choose_list(term.delay(), otherwise)
+                    .force();
 
                 Some(term)
             }
@@ -5170,13 +5083,9 @@ impl<'a> CodeGenerator<'a> {
                     }
                 }
 
-                term = term.lambda(format!("{tail_name_prefix}_0")).apply(
-                    Term::var(
-                        self.special_functions
-                            .use_function_uplc(CONSTR_FIELDS_EXPOSER.to_string()),
-                    )
-                    .apply(record),
-                );
+                term = term
+                    .lambda(format!("{tail_name_prefix}_0"))
+                    .apply(Term::var(CONSTR_FIELDS_EXPOSER).apply(record));
 
                 Some(term)
             }
@@ -5346,6 +5255,55 @@ impl<'a> CodeGenerator<'a> {
 
                 Some(known_data_to_type(Term::head_list().apply(arg), &tipo))
             }
+        }
+    }
+}
+
+fn handle_assigns(
+    subject_name: &String,
+    subject_tipo: Rc<Type>,
+    assigns: &[Assigned],
+    stick_set: &mut TreeSet,
+    then: AirTree,
+) -> AirTree {
+    match assigns {
+        [] => then,
+        [assign, rest @ ..] => {
+            let Assigned { path, assigned } = assign;
+
+            let current_tipo = get_tipo_by_path(subject_tipo.clone(), path);
+            let builtins_path = Builtins::new_from_path(subject_tipo.clone(), path.clone());
+            let current_subject_name = if builtins_path.is_empty() {
+                subject_name.clone()
+            } else {
+                format!("{}_{}", subject_name, builtins_path)
+            };
+
+            // Transition process from previous to current
+            let builtins_to_add = stick_set.diff_union_builtins(builtins_path.clone());
+
+            // Previous path to apply the transition process too
+            let prev_builtins = Builtins {
+                vec: builtins_path.vec[0..(builtins_path.len() - builtins_to_add.len())].to_vec(),
+            };
+
+            let prev_subject_name = if prev_builtins.is_empty() {
+                subject_name.clone()
+            } else {
+                format!("{}_{}", subject_name, prev_builtins)
+            };
+            let prev_tipo = prev_builtins
+                .vec
+                .last()
+                .map_or(subject_tipo.clone(), |last| last.tipo());
+
+            let assignment = AirTree::let_assignment(
+                assigned,
+                AirTree::local_var(current_subject_name, current_tipo),
+                handle_assigns(subject_name, subject_tipo, rest, stick_set, then),
+            );
+
+            builtins_to_add.produce_air(prev_subject_name, prev_tipo, assignment)
         }
     }
 }

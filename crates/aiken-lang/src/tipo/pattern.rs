@@ -1,12 +1,12 @@
 //! Type inference and checking of patterns used in case expressions
 //! and variables bindings.
 use super::{
-    environment::{assert_no_labeled_arguments, collapse_links, EntityKind, Environment},
+    PatternConstructor, Type, ValueConstructorVariant,
+    environment::{EntityKind, Environment, assert_no_labeled_arguments, collapse_links},
     error::{Error, Warning},
     hydrator::Hydrator,
-    PatternConstructor, Type, ValueConstructorVariant,
 };
-use crate::ast::{CallArg, Pattern, Span, TypedPattern, UntypedPattern};
+use crate::ast::{CallArg, Namespace, Pattern, Span, TypedPattern, UntypedPattern};
 use itertools::Itertools;
 use std::{
     collections::{HashMap, HashSet},
@@ -210,7 +210,7 @@ impl<'a, 'b> PatternTyper<'a, 'b> {
 
                 Ok(Pattern::ByteArray {
                     location,
-                    value,
+                    value: value.into_iter().map(|(b, _)| b).collect(),
                     preferred_format,
                 })
             }
@@ -462,6 +462,53 @@ impl<'a, 'b> PatternTyper<'a, 'b> {
                     }
                 };
 
+                if let Some(field_map) = cons.field_map() {
+                    if !is_record {
+                        let arguments = field_map
+                            .fields
+                            .iter()
+                            .sorted_by(|(_, (a, _)), (_, (b, _))| a.cmp(b))
+                            .zip(pattern_args.iter())
+                            .filter_map(|((field, (_, _)), arg)| {
+                                if arg.value.is_discard() {
+                                    None
+                                } else {
+                                    Some(CallArg {
+                                        label: Some(field.clone()),
+                                        location: arg
+                                            .location
+                                            .map(|start, _| (start, start + field.len())),
+                                        ..arg.clone()
+                                    })
+                                }
+                            })
+                            .collect::<Vec<_>>();
+
+                        let spread_location = if arguments.len() == field_map.fields.len() {
+                            None
+                        } else {
+                            Some(Span {
+                                start: location.end - 3,
+                                end: location.end - 1,
+                            })
+                        };
+
+                        self.environment.warnings.push(Warning::UnusedRecordFields {
+                            location,
+                            suggestion: Pattern::Constructor {
+                                is_record: true,
+                                location,
+                                name: name.clone(),
+                                arguments,
+                                module: module.clone(),
+                                constructor: (),
+                                spread_location,
+                                tipo: (),
+                            },
+                        });
+                    }
+                }
+
                 let instantiated_constructor_type = self.environment.instantiate(
                     constructor_typ,
                     &mut HashMap::new(),
@@ -523,7 +570,12 @@ impl<'a, 'b> PatternTyper<'a, 'b> {
 
                             Ok(Pattern::Constructor {
                                 location,
-                                module,
+                                // NOTE:
+                                // Type namespaces are completely erased during type-check.
+                                module: match module {
+                                    None | Some(Namespace::Type(..)) => None,
+                                    Some(Namespace::Module(m)) => Some(m),
+                                },
                                 name,
                                 arguments: pattern_args,
                                 constructor,
@@ -554,7 +606,12 @@ impl<'a, 'b> PatternTyper<'a, 'b> {
 
                             Ok(Pattern::Constructor {
                                 location,
-                                module,
+                                // NOTE:
+                                // Type namespaces are completely erased during type-check.
+                                module: match module {
+                                    None | Some(Namespace::Type(..)) => None,
+                                    Some(Namespace::Module(m)) => Some(m),
+                                },
                                 name,
                                 arguments: vec![],
                                 constructor,
