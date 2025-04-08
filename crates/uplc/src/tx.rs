@@ -1,7 +1,7 @@
 use crate::{
+    PlutusData,
     ast::{DeBruijn, NamedDeBruijn, Program},
     machine::{cost_model::ExBudget, eval_result::EvalResult},
-    PlutusData,
 };
 use error::Error;
 use pallas_primitives::{
