@@ -14,6 +14,7 @@ use owo_colors::{
     OwoColorize,
     Stream::{Stderr, Stdout},
 };
+use pallas_addresses::ScriptHash;
 use std::{
     collections::BTreeSet,
     fmt::{self, Debug, Display},
@@ -160,6 +161,14 @@ pub enum Error {
 
     #[error("I located conditional modules under 'env', but no default one!")]
     NoDefaultEnvironment,
+
+    #[error(
+        "I couldn't find the script corresponding to hash {script_hash} in your blueprint (plutus.json)."
+    )]
+    ScriptOverrideNotFound { script_hash: ScriptHash },
+
+    #[error("I couldn't parse the script override argument: {value}")]
+    ScriptOverrideArgumentParseError { value: String },
 }
 
 impl Error {
@@ -257,7 +266,9 @@ impl ExtraData for Error {
             | Error::Module { .. }
             | Error::NoDefaultEnvironment
             | Error::ModuleNotFound { .. }
-            | Error::ExportNotFound { .. } => None,
+            | Error::ExportNotFound { .. }
+            | Error::ScriptOverrideNotFound { .. }
+            | Error::ScriptOverrideArgumentParseError { .. } => None,
             Error::Type { error, .. } => error.extra_data(),
         }
     }
@@ -288,7 +299,9 @@ impl GetSource for Error {
             | Error::ModuleNotFound { .. }
             | Error::ExportNotFound { .. }
             | Error::NoDefaultEnvironment
-            | Error::Module { .. } => None,
+            | Error::Module { .. }
+            | Error::ScriptOverrideNotFound { .. }
+            | Error::ScriptOverrideArgumentParseError { .. } => None,
             Error::DuplicateModule { second: path, .. }
             | Error::MissingManifest { path }
             | Error::TomlLoading { path, .. }
@@ -320,7 +333,9 @@ impl GetSource for Error {
             | Error::MoreThanOneValidatorFound { .. }
             | Error::ModuleNotFound { .. }
             | Error::ExportNotFound { .. }
-            | Error::Module { .. } => None,
+            | Error::Module { .. }
+            | Error::ScriptOverrideNotFound { .. }
+            | Error::ScriptOverrideArgumentParseError { .. } => None,
             Error::TomlLoading { src, .. } | Error::Parse { src, .. } | Error::Type { src, .. } => {
                 Some(src.to_string())
             }
@@ -346,7 +361,6 @@ impl Diagnostic for Error {
 
         match self {
             Error::DuplicateModule { .. } => Some(boxed(Box::new("aiken::module::duplicate"))),
-            Error::FileIo { .. } => None,
             Error::Blueprint(e) => e.code().map(boxed),
             Error::ImportCycle { .. } => Some(boxed(Box::new("aiken::module::cyclical"))),
             Error::Parse { .. } => Some(boxed(Box::new("aiken::parser"))),
@@ -354,27 +368,30 @@ impl Diagnostic for Error {
                 "aiken::check{}",
                 error.code().map(|s| format!("::{s}")).unwrap_or_default()
             )))),
-            Error::StandardIo(_) => None,
-            Error::MissingManifest { .. } => None,
             Error::TomlLoading { .. } => Some(boxed(Box::new("aiken::loading::toml"))),
-            Error::Format { .. } => None,
             Error::TestFailure { path, .. } => Some(boxed(Box::new(path.to_str().unwrap_or("")))),
             Error::Http(_) => Some(Box::new("aiken::packages::download")),
-            Error::ZipExtract(_) => None,
-            Error::JoinError(_) => None,
             Error::UnknownPackageVersion { .. } => {
                 Some(boxed(Box::new("aiken::packages::resolve")))
             }
             Error::UnableToResolvePackage { .. } => {
                 Some(boxed(Box::new("aiken::package::download")))
             }
-            Error::Json { .. } => None,
-            Error::MalformedStakeAddress { .. } => None,
-            Error::NoValidatorNotFound { .. } => None,
-            Error::MoreThanOneValidatorFound { .. } => None,
-            Error::ExportNotFound { .. } => None,
-            Error::ModuleNotFound { .. } => None,
-            Error::NoDefaultEnvironment => None,
+            Error::StandardIo(_)
+            | Error::MissingManifest { .. }
+            | Error::ZipExtract(_)
+            | Error::JoinError(_)
+            | Error::FileIo { .. }
+            | Error::Format { .. }
+            | Error::Json { .. }
+            | Error::MalformedStakeAddress { .. }
+            | Error::NoValidatorNotFound { .. }
+            | Error::MoreThanOneValidatorFound { .. }
+            | Error::ExportNotFound { .. }
+            | Error::ModuleNotFound { .. }
+            | Error::NoDefaultEnvironment
+            | Error::ScriptOverrideNotFound { .. }
+            | Error::ScriptOverrideArgumentParseError { .. } => None,
             Error::Module(e) => e.code().map(boxed),
         }
     }
@@ -394,7 +411,6 @@ impl Diagnostic for Error {
             ))),
             Error::Parse { error, .. } => error.help(),
             Error::Type { error, .. } => error.help(),
-            Error::StandardIo(_) => None,
             Error::MissingManifest { .. } => Some(Box::new(
                 "Try running `aiken new <REPOSITORY/PROJECT>` to initialise a project with an example manifest.",
             )),
@@ -402,12 +418,7 @@ impl Diagnostic for Error {
                 "Environment module names are free, but there must be at least one named 'default.ak'.",
             )),
             Error::TomlLoading { help, .. } => Some(Box::new(help)),
-            Error::Format { .. } => None,
-            Error::TestFailure { .. } => None,
-            Error::Http(_) => None,
-            Error::ZipExtract(_) => None,
-            Error::JoinError(_) => None,
-            Error::ExportNotFound { .. } => None,
+
             Error::ModuleNotFound { known_modules, .. } => Some(Box::new(format!(
                 "I know about the following modules:\n{}",
                 known_modules
@@ -440,21 +451,24 @@ impl Diagnostic for Error {
                     "Here's a list of matching validators I've found in your project.\nPlease narrow the selection using additional options.",
                 )))
             }
+            Error::StandardIo(_)
+            | Error::Format { .. }
+            | Error::TestFailure { .. }
+            | Error::Http(_)
+            | Error::ZipExtract(_)
+            | Error::JoinError(_)
+            | Error::ExportNotFound { .. }
+            | Error::ScriptOverrideNotFound { .. }
+            | Error::ScriptOverrideArgumentParseError { .. } => None,
             Error::Module(e) => e.help(),
         }
     }
 
     fn labels(&self) -> Option<Box<dyn Iterator<Item = LabeledSpan> + '_>> {
         match self {
-            Error::DuplicateModule { .. } => None,
-            Error::FileIo { .. } => None,
-            Error::ImportCycle { .. } => None,
-            Error::ExportNotFound { .. } => None,
             Error::Blueprint(e) => e.labels(),
             Error::Parse { error, .. } => error.labels(),
-            Error::MissingManifest { .. } => None,
             Error::Type { error, .. } => error.labels(),
-            Error::StandardIo(_) => None,
             Error::TomlLoading { location, .. } => {
                 if let Some(location) = location {
                     Some(Box::new(
@@ -464,106 +478,122 @@ impl Diagnostic for Error {
                     None
                 }
             }
-            Error::Format { .. } => None,
-            Error::TestFailure { .. } => None,
-            Error::Http(_) => None,
-            Error::ZipExtract(_) => None,
-            Error::JoinError(_) => None,
-            Error::UnknownPackageVersion { .. } => None,
-            Error::UnableToResolvePackage { .. } => None,
-            Error::Json { .. } => None,
-            Error::MalformedStakeAddress { .. } => None,
-            Error::NoValidatorNotFound { .. } => None,
-            Error::MoreThanOneValidatorFound { .. } => None,
-            Error::NoDefaultEnvironment => None,
-            Error::ModuleNotFound { .. } => None,
+            Error::DuplicateModule { .. }
+            | Error::FileIo { .. }
+            | Error::ImportCycle { .. }
+            | Error::ExportNotFound { .. }
+            | Error::StandardIo(_)
+            | Error::MissingManifest { .. }
+            | Error::Format { .. }
+            | Error::TestFailure { .. }
+            | Error::Http(_)
+            | Error::ZipExtract(_)
+            | Error::JoinError(_)
+            | Error::UnknownPackageVersion { .. }
+            | Error::UnableToResolvePackage { .. }
+            | Error::Json { .. }
+            | Error::MalformedStakeAddress { .. }
+            | Error::NoValidatorNotFound { .. }
+            | Error::MoreThanOneValidatorFound { .. }
+            | Error::NoDefaultEnvironment
+            | Error::ModuleNotFound { .. }
+            | Error::ScriptOverrideNotFound { .. }
+            | Error::ScriptOverrideArgumentParseError { .. } => None,
+
             Error::Module(e) => e.labels(),
         }
     }
 
     fn source_code(&self) -> Option<&dyn SourceCode> {
         match self {
-            Error::DuplicateModule { .. } => None,
-            Error::FileIo { .. } => None,
-            Error::ImportCycle { .. } => None,
-            Error::ModuleNotFound { .. } => None,
-            Error::ExportNotFound { .. } => None,
             Error::Blueprint(e) => e.source_code(),
-            Error::NoDefaultEnvironment => None,
             Error::Parse { named, .. } => Some(named.as_ref()),
             Error::Type { named, .. } => Some(named),
-            Error::StandardIo(_) => None,
-            Error::MissingManifest { .. } => None,
             Error::TomlLoading { named, .. } => Some(named.as_ref()),
-            Error::Format { .. } => None,
-            Error::TestFailure { .. } => None,
-            Error::Http(_) => None,
-            Error::ZipExtract(_) => None,
-            Error::JoinError(_) => None,
-            Error::UnknownPackageVersion { .. } => None,
-            Error::UnableToResolvePackage { .. } => None,
-            Error::Json { .. } => None,
-            Error::MalformedStakeAddress { .. } => None,
-            Error::NoValidatorNotFound { .. } => None,
-            Error::MoreThanOneValidatorFound { .. } => None,
+            Error::DuplicateModule { .. }
+            | Error::FileIo { .. }
+            | Error::ImportCycle { .. }
+            | Error::ModuleNotFound { .. }
+            | Error::ExportNotFound { .. }
+            | Error::NoDefaultEnvironment
+            | Error::StandardIo(_)
+            | Error::MissingManifest { .. }
+            | Error::Format { .. }
+            | Error::TestFailure { .. }
+            | Error::Http(_)
+            | Error::ZipExtract(_)
+            | Error::JoinError(_)
+            | Error::UnknownPackageVersion { .. }
+            | Error::UnableToResolvePackage { .. }
+            | Error::Json { .. }
+            | Error::MalformedStakeAddress { .. }
+            | Error::NoValidatorNotFound { .. }
+            | Error::MoreThanOneValidatorFound { .. }
+            | Error::ScriptOverrideNotFound { .. }
+            | Error::ScriptOverrideArgumentParseError { .. } => None,
             Error::Module(e) => e.source_code(),
         }
     }
 
     fn url<'a>(&'a self) -> Option<Box<dyn Display + 'a>> {
         match self {
-            Error::DuplicateModule { .. } => None,
-            Error::FileIo { .. } => None,
-            Error::ImportCycle { .. } => None,
-            Error::ModuleNotFound { .. } => None,
-            Error::ExportNotFound { .. } => None,
             Error::Blueprint(e) => e.url(),
-            Error::Parse { .. } => None,
             Error::Type { error, .. } => error.url(),
-            Error::StandardIo(_) => None,
-            Error::MissingManifest { .. } => None,
-            Error::TomlLoading { .. } => None,
-            Error::Format { .. } => None,
-            Error::TestFailure { .. } => None,
-            Error::Http { .. } => None,
-            Error::ZipExtract { .. } => None,
-            Error::JoinError { .. } => None,
-            Error::UnknownPackageVersion { .. } => None,
-            Error::UnableToResolvePackage { .. } => None,
-            Error::Json { .. } => None,
-            Error::MalformedStakeAddress { .. } => None,
-            Error::NoValidatorNotFound { .. } => None,
-            Error::MoreThanOneValidatorFound { .. } => None,
-            Error::NoDefaultEnvironment => None,
+            Error::DuplicateModule { .. }
+            | Error::FileIo { .. }
+            | Error::ImportCycle { .. }
+            | Error::ModuleNotFound { .. }
+            | Error::ExportNotFound { .. }
+            | Error::Parse { .. }
+            | Error::StandardIo(_)
+            | Error::MissingManifest { .. }
+            | Error::TomlLoading { .. }
+            | Error::Format { .. }
+            | Error::TestFailure { .. }
+            | Error::Http { .. }
+            | Error::ZipExtract { .. }
+            | Error::JoinError { .. }
+            | Error::UnknownPackageVersion { .. }
+            | Error::UnableToResolvePackage { .. }
+            | Error::Json { .. }
+            | Error::MalformedStakeAddress { .. }
+            | Error::NoValidatorNotFound { .. }
+            | Error::MoreThanOneValidatorFound { .. }
+            | Error::NoDefaultEnvironment
+            | Error::ScriptOverrideNotFound { .. }
+            | Error::ScriptOverrideArgumentParseError { .. } => None,
+
             Error::Module(e) => e.url(),
         }
     }
 
     fn related<'a>(&'a self) -> Option<Box<dyn Iterator<Item = &'a dyn Diagnostic> + 'a>> {
         match self {
-            Error::DuplicateModule { .. } => None,
-            Error::FileIo { .. } => None,
-            Error::ModuleNotFound { .. } => None,
-            Error::ExportNotFound { .. } => None,
             Error::Blueprint(e) => e.related(),
-            Error::ImportCycle { .. } => None,
-            Error::Parse { .. } => None,
             Error::Type { error, .. } => error.related(),
-            Error::StandardIo(_) => None,
-            Error::NoDefaultEnvironment => None,
-            Error::MissingManifest { .. } => None,
-            Error::TomlLoading { .. } => None,
-            Error::Format { .. } => None,
-            Error::TestFailure { .. } => None,
-            Error::Http { .. } => None,
-            Error::ZipExtract { .. } => None,
-            Error::JoinError { .. } => None,
-            Error::UnknownPackageVersion { .. } => None,
-            Error::UnableToResolvePackage { .. } => None,
-            Error::Json { .. } => None,
-            Error::MalformedStakeAddress { .. } => None,
-            Error::NoValidatorNotFound { .. } => None,
-            Error::MoreThanOneValidatorFound { .. } => None,
+            Error::DuplicateModule { .. }
+            | Error::FileIo { .. }
+            | Error::ModuleNotFound { .. }
+            | Error::ExportNotFound { .. }
+            | Error::ImportCycle { .. }
+            | Error::Parse { .. }
+            | Error::StandardIo(_)
+            | Error::NoDefaultEnvironment
+            | Error::MissingManifest { .. }
+            | Error::TomlLoading { .. }
+            | Error::Format { .. }
+            | Error::TestFailure { .. }
+            | Error::Http { .. }
+            | Error::ZipExtract { .. }
+            | Error::JoinError { .. }
+            | Error::UnknownPackageVersion { .. }
+            | Error::UnableToResolvePackage { .. }
+            | Error::Json { .. }
+            | Error::MalformedStakeAddress { .. }
+            | Error::NoValidatorNotFound { .. }
+            | Error::MoreThanOneValidatorFound { .. }
+            | Error::ScriptOverrideNotFound { .. }
+            | Error::ScriptOverrideArgumentParseError { .. } => None,
             Error::Module(e) => e.related(),
         }
     }

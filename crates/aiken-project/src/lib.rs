@@ -544,10 +544,7 @@ where
             Some(StakePayload::Script(script)) => ShelleyDelegationPart::Script(script),
         };
 
-        // Read blueprint
-        let blueprint = File::open(blueprint_path)
-            .map_err(|_| blueprint::error::Error::InvalidOrMissingFile)?;
-        let blueprint: Blueprint = serde_json::from_reader(BufReader::new(blueprint))?;
+        let blueprint = self.blueprint(blueprint_path)?;
 
         // Calculate the address
         let when_too_many =
@@ -587,10 +584,7 @@ where
         validator_name: Option<&str>,
         blueprint_path: &Path,
     ) -> Result<PolicyId, Error> {
-        // Read blueprint
-        let blueprint = File::open(blueprint_path)
-            .map_err(|_| blueprint::error::Error::InvalidOrMissingFile)?;
-        let blueprint: Blueprint = serde_json::from_reader(BufReader::new(blueprint))?;
+        let blueprint = self.blueprint(blueprint_path)?;
 
         // Error handlers for ambiguous / missing validators
         let when_too_many =
@@ -607,7 +601,7 @@ where
                 if n > 0 {
                     Err(blueprint::error::Error::ParameterizedValidator { n }.into())
                 } else {
-                    Ok(validator.program.compiled_code_and_hash().1)
+                    Ok(validator.program.compiled_code_and_hash().0)
                 }
             },
         )
@@ -692,10 +686,7 @@ where
         blueprint_path: &Path,
         param: &PlutusData,
     ) -> Result<Blueprint, Error> {
-        // Read blueprint
-        let blueprint = File::open(blueprint_path)
-            .map_err(|_| blueprint::error::Error::InvalidOrMissingFile)?;
-        let mut blueprint: Blueprint = serde_json::from_reader(BufReader::new(blueprint))?;
+        let mut blueprint = self.blueprint(blueprint_path)?;
 
         // Apply parameters
         let when_too_many =
@@ -732,6 +723,12 @@ where
             .collect();
 
         Ok(blueprint)
+    }
+
+    pub fn blueprint(&self, path: &Path) -> Result<Blueprint, Error> {
+        let blueprint =
+            File::open(path).map_err(|_| blueprint::error::Error::InvalidOrMissingFile)?;
+        Ok(serde_json::from_reader(BufReader::new(blueprint))?)
     }
 
     fn with_dependencies(&mut self, parsed_packages: &mut ParsedModules) -> Result<(), Vec<Error>> {
