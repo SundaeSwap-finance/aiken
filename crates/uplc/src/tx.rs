@@ -31,10 +31,14 @@ pub fn tx_to_programs(
     tx: &MintedTx,
     utxos: &[ResolvedInput],
     slot_config: &SlotConfig,
+    script_overrides: HashMap<ScriptHash, PlutusScript>,
 ) -> Result<Vec<(Redeemer, Program<NamedDeBruijn>, Language)>, Error> {
     let redeemers = tx.transaction_witness_set.redeemer.as_ref();
 
-    let lookup_table = DataLookupTable::from_transaction(tx, utxos);
+    let mut lookup_table = DataLookupTable::from_transaction(tx, utxos);
+    script_overrides
+        .into_iter()
+        .for_each(|(hash, script)| lookup_table.override_script(hash, script));
     match redeemers {
         Some(rs) => {
             let mut collected_programs = vec![];
