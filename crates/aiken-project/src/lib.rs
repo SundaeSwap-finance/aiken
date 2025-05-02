@@ -157,7 +157,7 @@ where
         }
     }
 
-    pub fn new_generator(&'_ self, tracing: Tracing) -> CodeGenerator<'_> {
+    pub fn new_generator(&'_ self, tracing: Tracing, source_maps: bool) -> CodeGenerator<'_> {
         CodeGenerator::new(
             self.config.plutus,
             utils::indexmap::as_ref_values(&self.functions),
@@ -166,6 +166,7 @@ where
             utils::indexmap::as_str_ref_values(&self.module_types),
             utils::indexmap::as_str_ref_values(&self.module_sources),
             tracing,
+            source_maps,
         )
     }
 
@@ -203,12 +204,13 @@ where
     pub fn build(
         &mut self,
         uplc: bool,
+        source_map: bool,
         tracing: Tracing,
         blueprint_path: PathBuf,
         env: Option<String>,
     ) -> Result<(), Vec<Error>> {
         let options = Options {
-            code_gen_mode: CodeGenMode::Build(uplc),
+            code_gen_mode: CodeGenMode::Build(uplc, source_map),
             tracing,
             env,
             blueprint_path,
@@ -333,12 +335,26 @@ where
         fs::create_dir_all(&dir)?;
 
         for validator in &blueprint.validators {
-            let path = dir.clone().join(format!("{}.uplc", validator.title));
+            let uplc_path = dir.clone().join(format!("{}.uplc", validator.title));
+            let map_path = dir.clone().join(format!("{}.map", validator.title));
 
             let program = &validator.program;
             let program: Program<Name> = program.inner().try_into().unwrap();
 
-            fs::write(&path, program.to_pretty()).map_err(|error| Error::FileIo { error, path })?;
+            fs::write(&uplc_path, program.to_pretty()).map_err(|error| Error::FileIo {
+                error,
+                path: uplc_path,
+            })?;
+
+            let source_map = &validator.source_map;
+            if source_map.is_empty() {
+                continue;
+            }
+            let source_map = serde_json::to_string_pretty(source_map)?;
+            fs::write(&map_path, &source_map).map_err(|error| Error::FileIo {
+                error,
+                path: map_path,
+            })?
         }
 
         Ok(())
@@ -389,7 +405,7 @@ where
         self.type_check(&mut modules, options.tracing, env, true)?;
 
         match options.code_gen_mode {
-            CodeGenMode::Build(uplc_dump) => {
+            CodeGenMode::Build(uplc_dump, source_maps) => {
                 self.event_listener
                     .handle_event(Event::GeneratingBlueprint {
                         path: options.blueprint_path.clone(),
@@ -399,7 +415,7 @@ where
                     m.attach_doc_and_module_comments();
                 });
 
-                let mut generator = self.new_generator(options.tracing);
+                let mut generator = self.new_generator(options.tracing, source_maps);
 
                 let blueprint = Blueprint::new(&self.config, &self.checked_modules, &mut generator)
                     .map_err(Error::Blueprint)?;
@@ -607,7 +623,13 @@ where
         )
     }
 
-    pub fn export(&self, module: &str, name: &str, tracing: Tracing) -> Result<Export, Error> {
+    pub fn export(
+        &self,
+        module: &str,
+        name: &str,
+        tracing: Tracing,
+        source_maps: bool,
+    ) -> Result<Export, Error> {
         let checked_module =
             self.checked_modules
                 .get(module)
@@ -624,7 +646,7 @@ where
                 _ => None,
             })
             .map(|(checked_module, func)| {
-                let mut generator = self.new_generator(tracing);
+                let mut generator = self.new_generator(tracing, source_maps);
 
                 Export::from_function(
                     func,
@@ -1078,7 +1100,7 @@ where
             }
         }
 
-        let mut generator = self.new_generator(tracing);
+        let mut generator = self.new_generator(tracing, false);
 
         let mut tests = Vec::new();
 

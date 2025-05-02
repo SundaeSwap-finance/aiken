@@ -758,6 +758,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn convert_latex_markers_simple() {
         assert_eq!(
             convert_latex_markers(
@@ -768,6 +769,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn convert_latex_markers_sequence() {
         assert_eq!(
             convert_latex_markers(

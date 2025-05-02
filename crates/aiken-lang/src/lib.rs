@@ -14,6 +14,7 @@ pub mod line_numbers;
 pub mod parser;
 pub mod plutus_version;
 pub mod pretty;
+pub mod source_map;
 pub mod test_framework;
 pub mod tipo;
 pub mod utils;

@@ -1,9 +1,10 @@
 use super::{
     Error,
+    indexed_term::IndexedTerm,
     runtime::{self, BuiltinRuntime},
 };
 use crate::{
-    ast::{Constant, NamedDeBruijn, Term, Type},
+    ast::{Constant, NamedDeBruijn, Type},
     builtins::DefaultFunction,
 };
 use num_bigint::BigInt;
@@ -16,10 +17,10 @@ pub(super) type Env = Rc<Vec<Value>>;
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
     Con(Rc<Constant>),
-    Delay(Rc<Term<NamedDeBruijn>>, Env),
+    Delay(Rc<IndexedTerm<NamedDeBruijn>>, Env),
     Lambda {
         parameter_name: Rc<NamedDeBruijn>,
-        body: Rc<Term<NamedDeBruijn>>,
+        body: Rc<IndexedTerm<NamedDeBruijn>>,
         env: Env,
     },
     Builtin {

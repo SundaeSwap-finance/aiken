@@ -76,6 +76,10 @@ pub struct Args {
     /// [optional]
     #[clap(short, long, value_parser=trace_level_parser(), default_value_t=TraceLevel::Silent, verbatim_doc_comment)]
     trace_level: TraceLevel,
+
+    /// Generate a source map alongside the output UPLC.
+    #[clap(short, long)]
+    source_map: bool,
 }
 
 pub fn exec(
@@ -89,12 +93,14 @@ pub fn exec(
         trace_level,
         output,
         env,
+        source_map,
     }: Args,
 ) -> miette::Result<()> {
     let result = if watch {
         watch_project(directory.as_deref(), watch::default_filter, 500, |p| {
             p.build(
                 uplc,
+                source_map,
                 match trace_filter {
                     Some(trace_filter) => trace_filter(trace_level),
                     None => Tracing::All(trace_level),
@@ -107,6 +113,7 @@ pub fn exec(
         with_project(directory.as_deref(), deny, silent, false, |p| {
             p.build(
                 uplc,
+                source_map,
                 match trace_filter {
                     Some(trace_filter) => trace_filter(trace_level),
                     None => Tracing::All(trace_level),

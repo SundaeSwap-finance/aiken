@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::{
     PlutusData,
-    ast::{DeBruijn, Program},
+    ast::{DeBruijn, NamedDeBruijn, Program},
     machine::{cost_model::ExBudget, eval_result::EvalResult},
 };
 use error::Error;
@@ -10,8 +10,8 @@ use pallas_addresses::ScriptHash;
 use pallas_primitives::{
     Fragment,
     conway::{
-        CostModels, ExUnits, MintedTx, Redeemer, Redeemers, RedeemersKey, TransactionInput,
-        TransactionOutput,
+        CostModels, ExUnits, Language, MintedTx, Redeemer, Redeemers, RedeemersKey,
+        TransactionInput, TransactionOutput,
     },
 };
 use pallas_traverse::{Era, MultiEraTx};
@@ -26,6 +26,43 @@ pub mod script_context;
 #[cfg(test)]
 mod tests;
 pub mod to_plutus_data;
+
+pub fn tx_to_programs(
+    tx: &MintedTx,
+    utxos: &[ResolvedInput],
+    slot_config: &SlotConfig,
+) -> Result<Vec<(Redeemer, Program<NamedDeBruijn>, Language)>, Error> {
+    let redeemers = tx.transaction_witness_set.redeemer.as_ref();
+
+    let lookup_table = DataLookupTable::from_transaction(tx, utxos);
+    match redeemers {
+        Some(rs) => {
+            let mut collected_programs = vec![];
+            let redeemers = match rs.clone().unwrap() {
+                Redeemers::List(rs) => rs.to_vec(),
+                Redeemers::Map(rs) => rs
+                    .into_iter()
+                    .map(|(k, v)| Redeemer {
+                        tag: k.tag,
+                        index: k.index,
+                        data: v.data,
+                        ex_units: v.ex_units,
+                    })
+                    .collect(),
+            };
+
+            for redeemer in redeemers {
+                let (program, language) =
+                    eval::redeemer_to_program(tx, utxos, slot_config, &redeemer, &lookup_table)?;
+
+                collected_programs.push((redeemer, program, language));
+            }
+
+            Ok(collected_programs)
+        }
+        None => Ok(vec![]),
+    }
+}
 
 /// Evaluate the scripts in a transaction using
 /// the UPLC Cek Machine. This function collects

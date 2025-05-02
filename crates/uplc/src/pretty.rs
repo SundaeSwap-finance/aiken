@@ -203,7 +203,7 @@ impl Constant {
             .join("\n")
     }
 
-    fn to_doc(&self) -> RcDoc<()> {
+    pub fn to_doc(&self) -> RcDoc<()> {
         match self {
             Constant::Integer(i) => RcDoc::text("integer")
                 .append(RcDoc::line())
@@ -272,7 +272,7 @@ impl Constant {
         }
     }
 
-    fn to_doc_list(&self) -> RcDoc<()> {
+    pub fn to_doc_list(&self) -> RcDoc<()> {
         match self {
             Constant::Integer(i) => RcDoc::as_string(i),
             Constant::ByteString(bs) => RcDoc::text("#").append(RcDoc::text(hex::encode(bs))),
@@ -365,7 +365,7 @@ impl Constant {
 }
 
 impl Type {
-    fn to_doc(&self) -> RcDoc<()> {
+    pub fn to_doc(&self) -> RcDoc<()> {
         match self {
             Type::Bool => RcDoc::text("bool"),
             Type::Integer => RcDoc::text("integer"),

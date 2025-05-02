@@ -53,6 +53,10 @@ pub struct Args {
     /// [optional]
     #[clap(short, long, value_parser=trace_level_parser(), default_value_t=TraceLevel::Verbose, verbatim_doc_comment)]
     trace_level: TraceLevel,
+
+    /// Generate a source map alongside the output UPLC.
+    #[clap(short, long)]
+    source_map: bool,
 }
 
 pub fn exec(
@@ -62,6 +66,7 @@ pub fn exec(
         name,
         trace_filter,
         trace_level,
+        source_map,
     }: Args,
 ) -> miette::Result<()> {
     with_project(directory.as_deref(), false, false, false, |p| {
@@ -74,6 +79,7 @@ pub fn exec(
                 Some(trace_filter) => trace_filter(trace_level),
                 None => Tracing::All(trace_level),
             },
+            source_map,
         )?;
 
         let json = serde_json::to_string_pretty(&export).unwrap();

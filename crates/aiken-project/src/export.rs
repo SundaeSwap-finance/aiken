@@ -11,11 +11,13 @@ use aiken_lang::{
     ast::{ArgName, Span, TypedArg, TypedFunction},
     gen_uplc::CodeGenerator,
     plutus_version::PlutusVersion,
+    source_map::SourceMap,
 };
 use miette::NamedSource;
 use uplc::ast::SerializableProgram;
 
 #[derive(Debug, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Export {
     pub name: String,
 
@@ -34,6 +36,9 @@ pub struct Export {
     #[serde(skip_serializing_if = "Definitions::is_empty")]
     #[serde(default)]
     pub definitions: Definitions<Annotated<Schema>>,
+
+    #[serde(skip_serializing_if = "SourceMap::is_empty")]
+    pub source_map: SourceMap,
 }
 
 impl Export {
@@ -107,11 +112,13 @@ impl Export {
             .to_debruijn()
             .unwrap();
 
+        let (source_map, program) = SourceMap::extract(program);
+
         let program = match plutus_version {
-            PlutusVersion::V1 => SerializableProgram::PlutusV1Program(program),
-            PlutusVersion::V2 => SerializableProgram::PlutusV2Program(program),
-            PlutusVersion::V3 => SerializableProgram::PlutusV3Program(program),
-        };
+            PlutusVersion::V1 => SerializableProgram::PlutusV1Program,
+            PlutusVersion::V2 => SerializableProgram::PlutusV2Program,
+            PlutusVersion::V3 => SerializableProgram::PlutusV3Program,
+        }(program);
 
         Ok(Export {
             name: format!("{}.{}", &module.name, &func.name),
@@ -120,6 +127,7 @@ impl Export {
             return_type,
             program,
             definitions,
+            source_map,
         })
     }
 }

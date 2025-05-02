@@ -18,7 +18,7 @@ description: "Code:\n\npub type Foo<a> {\n  Empty\n  Bar(a, Foo<a>)\n}\n\npub fn
       }
     }
   ],
-  "return_type": {
+  "returnType": {
     "title": "return_type",
     "schema": {
       "$ref": "#/definitions/Int"

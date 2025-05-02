@@ -15,6 +15,79 @@ use crate::{
 use pallas_codec::utils::Bytes;
 use pallas_primitives::conway::{CostModel, CostModels, ExUnits, Language, MintedTx, Redeemer};
 
+pub fn redeemer_to_program(
+    tx: &MintedTx,
+    utxos: &[ResolvedInput],
+    slot_config: &SlotConfig,
+    redeemer: &Redeemer,
+    lookup_table: &DataLookupTable,
+) -> Result<(Program<NamedDeBruijn>, Language), Error> {
+    fn do_build_program(
+        datum: Option<PlutusData>,
+        redeemer: &Redeemer,
+        language: Language,
+        tx_info: TxInfo,
+        program: Program<NamedDeBruijn>,
+    ) -> Result<(Program<NamedDeBruijn>, Language), Error> {
+        let script_context = tx_info
+            .into_script_context(redeemer, datum.as_ref())
+            .expect("couldn't create script context from transaction?");
+
+        let program = match script_context {
+            ScriptContext::V1V2 { .. } => if let Some(datum) = datum {
+                program.apply_data(datum)
+            } else {
+                program
+            }
+            .apply_data(redeemer.data.clone())
+            .apply_data(script_context.to_plutus_data()),
+
+            ScriptContext::V3 { .. } => program.apply_data(script_context.to_plutus_data()),
+        };
+
+        Ok((program, language))
+    }
+
+    let program = |script: Bytes| {
+        let mut buffer = Vec::new();
+        Program::<FakeNamedDeBruijn>::from_cbor(&script, &mut buffer)
+            .map(Into::<Program<NamedDeBruijn>>::into)
+    };
+
+    match find_script(redeemer, tx, utxos, lookup_table)? {
+        (ScriptVersion::Native(_), _) => Err(Error::NativeScriptPhaseTwo),
+
+        (ScriptVersion::V1(script), datum) => do_build_program(
+            datum,
+            redeemer,
+            Language::PlutusV1,
+            TxInfoV1::from_transaction(tx, utxos, slot_config)?,
+            program(script.0)?,
+        ),
+
+        (ScriptVersion::V2(script), datum) => do_build_program(
+            datum,
+            redeemer,
+            Language::PlutusV2,
+            TxInfoV2::from_transaction(tx, utxos, slot_config)?,
+            program(script.0)?,
+        ),
+
+        (ScriptVersion::V3(script), datum) => do_build_program(
+            datum,
+            redeemer,
+            Language::PlutusV3,
+            TxInfoV3::from_transaction(tx, utxos, slot_config)?,
+            program(script.0)?,
+        ),
+    }
+    .map_err(|err| Error::RedeemerError {
+        tag: redeemer_tag_to_string(&redeemer.tag),
+        index: redeemer.index,
+        err: Box::new(err),
+    })
+}
+
 pub fn eval_redeemer(
     tx: &MintedTx,
     utxos: &[ResolvedInput],

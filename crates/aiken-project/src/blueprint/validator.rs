@@ -10,6 +10,7 @@ use aiken_lang::{
     ast::{Annotation, TypedArg, TypedFunction, TypedValidator, well_known},
     gen_uplc::CodeGenerator,
     plutus_version::PlutusVersion,
+    source_map::SourceMap,
     tipo::Type,
 };
 use miette::NamedSource;
@@ -43,6 +44,9 @@ pub struct Validator {
     #[serde(skip_serializing_if = "Definitions::is_empty")]
     #[serde(default)]
     pub definitions: Definitions<Annotated<Schema>>,
+
+    #[serde(skip_serializing_if = "SourceMap::is_empty")]
+    pub source_map: SourceMap,
 }
 
 impl Validator {
@@ -211,6 +215,7 @@ impl Validator {
             (datum, Some(redeemer))
         };
 
+        let (source_map, program) = SourceMap::extract(program.get(generator, def, &module.name));
         let redeemer = redeemer.or(Some(Parameter {
             title: None,
             schema: Declaration::Inline(Box::new(Schema::Data(Data::Opaque))),
@@ -236,8 +241,9 @@ impl Validator {
                 PlutusVersion::V1 => SerializableProgram::PlutusV1Program,
                 PlutusVersion::V2 => SerializableProgram::PlutusV2Program,
                 PlutusVersion::V3 => SerializableProgram::PlutusV3Program,
-            }(program.get(generator, def, &module.name)),
+            }(program),
             definitions,
+            source_map,
         })
     }
 }

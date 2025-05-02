@@ -29,7 +29,7 @@ pub enum CodeGenMode {
         property_max_success: usize,
         coverage_mode: CoverageMode,
     },
-    Build(bool),
+    Build(bool, bool),
     Benchmark {
         match_benchmarks: Option<Vec<String>>,
         exact_match: bool,

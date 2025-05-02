@@ -18,7 +18,7 @@ description: "Code:\n\npub fn add(a: Int, b: Int) -> Int {\n    a + b\n}\n"
       }
     }
   ],
-  "return_type": {
+  "returnType": {
     "title": "return_type",
     "schema": {
       "$ref": "#/definitions/Int"
