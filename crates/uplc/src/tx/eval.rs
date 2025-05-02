@@ -55,9 +55,7 @@ pub fn redeemer_to_program(
     };
 
     match find_script(redeemer, tx, utxos, lookup_table)? {
-        (ScriptVersion::Native(_), _) => Err(Error::NativeScriptPhaseTwo),
-
-        (ScriptVersion::V1(script), datum) => do_build_program(
+        (PlutusScript::V1(script), datum) => do_build_program(
             datum,
             redeemer,
             Language::PlutusV1,
@@ -65,7 +63,7 @@ pub fn redeemer_to_program(
             program(script.0)?,
         ),
 
-        (ScriptVersion::V2(script), datum) => do_build_program(
+        (PlutusScript::V2(script), datum) => do_build_program(
             datum,
             redeemer,
             Language::PlutusV2,
@@ -73,7 +71,7 @@ pub fn redeemer_to_program(
             program(script.0)?,
         ),
 
-        (ScriptVersion::V3(script), datum) => do_build_program(
+        (PlutusScript::V3(script), datum) => do_build_program(
             datum,
             redeemer,
             Language::PlutusV3,
