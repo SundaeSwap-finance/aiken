@@ -1,4 +1,4 @@
-use crate::ast::NamedDeBruijn;
+use crate::ast::{DeBruijn, NamedDeBruijn};
 
 use super::{
     indexed_term::IndexedTerm,
@@ -69,9 +69,8 @@ fn with_env(
             if lam_cnt >= idx {
                 IndexedTerm::Var { index, name }
             } else {
-                env.get::<usize>(env.len() - (idx - lam_cnt))
-                    .cloned()
-                    .map_or(IndexedTerm::Var { index, name }, value_as_term)
+                let idx = NamedDeBruijn { text: name.text.clone(), index: DeBruijn::new(idx - lam_cnt) };
+                env.get(&idx).map_or(IndexedTerm::Var { index, name }, value_as_term)
             }
         }
         IndexedTerm::Lambda {

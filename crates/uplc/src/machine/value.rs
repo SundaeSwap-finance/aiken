@@ -12,7 +12,31 @@ use num_traits::{Signed, ToPrimitive, Zero};
 use pallas_primitives::conway::{self, PlutusData};
 use std::{collections::VecDeque, mem::size_of, ops::Deref, rc::Rc};
 
-pub(super) type Env = Rc<Vec<Value>>;
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct Env {
+  values: Rc<Vec<Value>>
+}
+
+impl Env {
+  pub fn new() -> Self {
+    Self { values: Rc::new(vec![]) }
+  }
+
+  pub fn len(&self) -> usize {
+    self.values.len()
+  }
+
+  pub fn get(&self, name: &NamedDeBruijn) -> Option<Value> {
+    let len = self.values.len();
+    let idx: usize = name.index.into();
+    self.values.get::<usize>(len - idx).cloned()
+  }
+
+  pub fn push(&mut self, _name: &NamedDeBruijn, value: Value) {
+    let vs = Rc::make_mut(&mut self.values);
+    vs.push(value)
+  }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {

@@ -95,7 +95,7 @@ impl Blueprint {
         &self,
         want_module_name: Option<&str>,
         want_validator_name: Option<&str>,
-    ) -> Option<LookupResult<Validator>> {
+    ) -> Option<LookupResult<'_, Validator>> {
         let mut validator = None;
 
         for v in self.validators.iter() {

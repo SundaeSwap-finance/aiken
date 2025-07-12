@@ -157,7 +157,7 @@ impl Machine {
 
         Ok(MachineState::Compute(
             Context::NoFrame,
-            Rc::new(vec![]),
+            Default::default(),
             IndexedTerm::from(term),
         ))
     }
@@ -366,14 +366,12 @@ impl Machine {
         argument: Value,
     ) -> Result<MachineState, Error> {
         match function {
-            Value::Lambda { body, mut env, .. } => {
-                let e = Rc::make_mut(&mut env);
-
-                e.push(argument);
+            Value::Lambda { body, mut env, parameter_name } => {
+                env.push(parameter_name.as_ref(), argument);
 
                 Ok(MachineState::Compute(
                     context,
-                    Rc::new(e.clone()),
+                    env.clone(),
                     body.as_ref().clone(),
                 ))
             }
@@ -415,9 +413,8 @@ impl Machine {
         runtime.call(&self.version, &mut self.traces)
     }
 
-    fn lookup_var(&mut self, name: &NamedDeBruijn, env: &[Value]) -> Result<Value, Error> {
-        env.get::<usize>(env.len() - usize::from(name.index))
-            .cloned()
+    fn lookup_var(&mut self, name: &NamedDeBruijn, env: &Env) -> Result<Value, Error> {
+        env.get(name)
             .ok_or_else(|| {
                 Error::OpenTermEvaluated(IndexedTerm::Var {
                     index: None,

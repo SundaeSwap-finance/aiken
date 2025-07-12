@@ -257,7 +257,7 @@ where
             .join("\n")
     }
 
-    fn to_doc(&self) -> RcDoc<()> {
+    fn to_doc(&self) -> RcDoc<'_, ()> {
         match self {
             IndexedTerm::Var { name, .. } => RcDoc::text(name.text()),
             IndexedTerm::Delay { then, .. } => RcDoc::text("(")
