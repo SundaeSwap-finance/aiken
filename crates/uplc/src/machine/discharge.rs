@@ -69,8 +69,12 @@ fn with_env(
             if lam_cnt >= idx {
                 IndexedTerm::Var { index, name }
             } else {
-                let idx = NamedDeBruijn { text: name.text.clone(), index: DeBruijn::new(idx - lam_cnt) };
-                env.get(&idx).map_or(IndexedTerm::Var { index, name }, value_as_term)
+                let idx = NamedDeBruijn {
+                    text: name.text.clone(),
+                    index: DeBruijn::new(idx - lam_cnt),
+                };
+                env.get(&idx)
+                    .map_or(IndexedTerm::Var { index, name }, value_as_term)
             }
         }
         IndexedTerm::Lambda {

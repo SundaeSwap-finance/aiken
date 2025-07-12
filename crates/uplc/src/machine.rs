@@ -366,7 +366,11 @@ impl Machine {
         argument: Value,
     ) -> Result<MachineState, Error> {
         match function {
-            Value::Lambda { body, mut env, parameter_name } => {
+            Value::Lambda {
+                body,
+                mut env,
+                parameter_name,
+            } => {
                 env.push(parameter_name.as_ref(), argument);
 
                 Ok(MachineState::Compute(
@@ -414,13 +418,12 @@ impl Machine {
     }
 
     fn lookup_var(&mut self, name: &NamedDeBruijn, env: &Env) -> Result<Value, Error> {
-        env.get(name)
-            .ok_or_else(|| {
-                Error::OpenTermEvaluated(IndexedTerm::Var {
-                    index: None,
-                    name: name.clone().into(),
-                })
+        env.get(name).ok_or_else(|| {
+            Error::OpenTermEvaluated(IndexedTerm::Var {
+                index: None,
+                name: name.clone().into(),
             })
+        })
     }
 
     fn step_and_maybe_spend(&mut self, step: StepKind) -> Result<(), Error> {

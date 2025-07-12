@@ -14,28 +14,30 @@ use std::{collections::VecDeque, mem::size_of, ops::Deref, rc::Rc};
 
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct Env {
-  pub values: Rc<Vec<(NamedDeBruijn, Value)>>
+    pub values: Rc<Vec<(NamedDeBruijn, Value)>>,
 }
 
 impl Env {
-  pub fn new() -> Self {
-    Self { values: Rc::new(vec![]) }
-  }
+    pub fn new() -> Self {
+        Self {
+            values: Rc::new(vec![]),
+        }
+    }
 
-  pub fn len(&self) -> usize {
-    self.values.len()
-  }
+    pub fn len(&self) -> usize {
+        self.values.len()
+    }
 
-  pub fn get(&self, name: &NamedDeBruijn) -> Option<Value> {
-    let len = self.values.len();
-    let idx: usize = name.index.into();
-    self.values.get::<usize>(len - idx).map(|(_, v)| v).cloned()
-  }
+    pub fn get(&self, name: &NamedDeBruijn) -> Option<Value> {
+        let len = self.values.len();
+        let idx: usize = name.index.into();
+        self.values.get::<usize>(len - idx).map(|(_, v)| v).cloned()
+    }
 
-  pub fn push(&mut self, name: &NamedDeBruijn, value: Value) {
-    let vs = Rc::make_mut(&mut self.values);
-    vs.push((name.clone(), value))
-  }
+    pub fn push(&mut self, name: &NamedDeBruijn, value: Value) {
+        let vs = Rc::make_mut(&mut self.values);
+        vs.push((name.clone(), value))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
