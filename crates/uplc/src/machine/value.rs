@@ -14,7 +14,7 @@ use std::{collections::VecDeque, mem::size_of, ops::Deref, rc::Rc};
 
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct Env {
-  values: Rc<Vec<Value>>
+  pub values: Rc<Vec<(NamedDeBruijn, Value)>>
 }
 
 impl Env {
@@ -29,12 +29,12 @@ impl Env {
   pub fn get(&self, name: &NamedDeBruijn) -> Option<Value> {
     let len = self.values.len();
     let idx: usize = name.index.into();
-    self.values.get::<usize>(len - idx).cloned()
+    self.values.get::<usize>(len - idx).map(|(_, v)| v).cloned()
   }
 
-  pub fn push(&mut self, _name: &NamedDeBruijn, value: Value) {
+  pub fn push(&mut self, name: &NamedDeBruijn, value: Value) {
     let vs = Rc::make_mut(&mut self.values);
-    vs.push(value)
+    vs.push((name.clone(), value))
   }
 }
 
