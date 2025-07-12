@@ -121,7 +121,7 @@ where
                 .append(
                     RcDoc::text("con")
                         .append(RcDoc::line())
-                        .append(constant.to_doc())
+                        .append(constant.to_doc(1000))
                         .nest(2),
                 )
                 .append(RcDoc::line_())
@@ -184,7 +184,7 @@ impl Constant {
     pub fn to_pretty(&self) -> String {
         let mut w = Vec::new();
 
-        self.to_doc().render(80, &mut w).unwrap();
+        self.to_doc(1000).render(80, &mut w).unwrap();
 
         String::from_utf8(w)
             .unwrap()
@@ -203,7 +203,10 @@ impl Constant {
             .join("\n")
     }
 
-    pub fn to_doc(&self) -> RcDoc<'_, ()> {
+    pub fn to_doc(&self, depth: usize) -> RcDoc<'_, ()> {
+        if depth <= 0 {
+          return RcDoc::text("...");
+        }
         match self {
             Constant::Integer(i) => RcDoc::text("integer")
                 .append(RcDoc::line())
@@ -239,7 +242,7 @@ impl Constant {
                 .append(RcDoc::line())
                 .append(RcDoc::text("["))
                 .append(RcDoc::intersperse(
-                    items.iter().map(|c| c.to_doc_list()),
+                    items.iter().map(|c| c.to_doc_list(depth - 1)),
                     RcDoc::text(", "),
                 ))
                 .append(RcDoc::text("]")),
@@ -252,13 +255,13 @@ impl Constant {
                 .append(RcDoc::text(")"))
                 .append(RcDoc::line())
                 .append(RcDoc::text("("))
-                .append(left.to_doc_list())
+                .append(left.to_doc_list(depth - 1))
                 .append(RcDoc::text(", "))
-                .append(right.to_doc_list())
+                .append(right.to_doc_list(depth - 1))
                 .append(RcDoc::text(")")),
             Constant::Data(d) => RcDoc::text("data ")
                 .append(RcDoc::text("("))
-                .append(Self::to_doc_list_plutus_data(d))
+                .append(Self::to_doc_list_plutus_data(d, depth - 1))
                 .append(RcDoc::text(")")),
             Constant::Bls12_381G1Element(p1) => RcDoc::text("bls12_381_G1_element ")
                 .append(RcDoc::line())
@@ -272,7 +275,10 @@ impl Constant {
         }
     }
 
-    pub fn to_doc_list(&self) -> RcDoc<'_, ()> {
+    pub fn to_doc_list(&self, depth: usize) -> RcDoc<'_, ()> {
+        if depth <= 0 {
+          return RcDoc::text("...");
+        }
         match self {
             Constant::Integer(i) => RcDoc::as_string(i),
             Constant::ByteString(bs) => RcDoc::text("#").append(RcDoc::text(hex::encode(bs))),
@@ -291,17 +297,17 @@ impl Constant {
             Constant::Bool(b) => RcDoc::text(if *b { "True" } else { "False" }),
             Constant::ProtoList(_, items) => RcDoc::text("[")
                 .append(RcDoc::intersperse(
-                    items.iter().map(|c| c.to_doc_list()),
+                    items.iter().map(|c| c.to_doc_list(depth - 1)),
                     RcDoc::text(", "),
                 ))
                 .append(RcDoc::text("]")),
             Constant::ProtoPair(_, _, left, right) => RcDoc::text("(")
-                .append((*left).to_doc_list())
+                .append((*left).to_doc_list(depth - 1))
                 .append(RcDoc::text(", "))
-                .append((*right).to_doc_list())
+                .append((*right).to_doc_list(depth - 1))
                 .append(RcDoc::text(")")),
 
-            Constant::Data(data) => Self::to_doc_list_plutus_data(data),
+            Constant::Data(data) => Self::to_doc_list_plutus_data(data, depth - 1),
             Constant::Bls12_381G1Element(p1) => {
                 RcDoc::text("0x").append(RcDoc::text(hex::encode(p1.compress())))
             }
@@ -313,7 +319,10 @@ impl Constant {
     }
 
     // This feels a little awkward here; not sure if it should be upstreamed to pallas
-    fn to_doc_list_plutus_data(data: &PlutusData) -> RcDoc<'_, ()> {
+    fn to_doc_list_plutus_data(data: &PlutusData, depth: usize) -> RcDoc<'_, ()> {
+        if depth <= 0 {
+          return RcDoc::text("...");
+        }
         match data {
             PlutusData::Constr(Constr {
                 tag,
@@ -327,7 +336,7 @@ impl Constant {
                 .append(RcDoc::space())
                 .append(RcDoc::text("["))
                 .append(RcDoc::intersperse(
-                    fields.iter().map(Self::to_doc_list_plutus_data),
+                  fields.iter().map(|f| Self::to_doc_list_plutus_data(f, depth - 1)),
                     RcDoc::text(", "),
                 ))
                 .append(RcDoc::text("]")),
@@ -337,9 +346,9 @@ impl Constant {
                 .append(RcDoc::intersperse(
                     kvp.iter().map(|(key, value)| {
                         RcDoc::text("(")
-                            .append(Self::to_doc_list_plutus_data(key))
+                            .append(Self::to_doc_list_plutus_data(key, depth - 1))
                             .append(RcDoc::text(", "))
-                            .append(Self::to_doc_list_plutus_data(value))
+                            .append(Self::to_doc_list_plutus_data(value, depth - 1))
                             .append(RcDoc::text(")"))
                     }),
                     RcDoc::text(", "),
@@ -356,7 +365,7 @@ impl Constant {
                 .append(RcDoc::space())
                 .append(RcDoc::text("["))
                 .append(RcDoc::intersperse(
-                    a.iter().map(Self::to_doc_list_plutus_data),
+                  a.iter().map(|a| Self::to_doc_list_plutus_data(a, depth - 1)),
                     RcDoc::text(", "),
                 ))
                 .append(RcDoc::text("]")),

@@ -12,7 +12,7 @@ pub enum Error {
     #[error(
         "cannot evaluate an open term:\n{:>13} {}",
         "Term",
-        indent(redacted(.0.to_pretty(), 10)),
+        indent(redacted(.0.to_pretty(10), 10)),
     )]
     OpenTermEvaluated(IndexedTerm<NamedDeBruijn>),
     #[error("the validator crashed / exited prematurely")]

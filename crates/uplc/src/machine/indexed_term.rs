@@ -160,7 +160,7 @@ where
     T: Binder<'a>,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.to_pretty())
+        write!(f, "{}", self.to_pretty(5))
     }
 }
 
@@ -235,10 +235,10 @@ impl<'a, T> IndexedTerm<T>
 where
     T: Binder<'a>,
 {
-    pub fn to_pretty(&self) -> String {
+    pub fn to_pretty(&self, depth: usize) -> String {
         let mut w = Vec::new();
 
-        self.to_doc().render(80, &mut w).unwrap();
+        self.to_doc(depth).render(80, &mut w).unwrap();
 
         String::from_utf8(w)
             .unwrap()
@@ -257,14 +257,17 @@ where
             .join("\n")
     }
 
-    fn to_doc(&self) -> RcDoc<'_, ()> {
-        match self {
+    fn to_doc(&self, depth: usize) -> RcDoc<'_, ()> {
+      if depth <= 0 {
+        return RcDoc::text("...")
+      }
+      match self {
             IndexedTerm::Var { name, .. } => RcDoc::text(name.text()),
             IndexedTerm::Delay { then, .. } => RcDoc::text("(")
                 .append(
                     RcDoc::text("delay")
                         .append(RcDoc::line())
-                        .append(then.to_doc())
+                        .append(then.to_doc(depth - 1))
                         .nest(2),
                 )
                 .append(RcDoc::line_())
@@ -279,7 +282,7 @@ where
                         .append(RcDoc::line())
                         .append(RcDoc::text(parameter_name.text()))
                         .append(RcDoc::line())
-                        .append(body.to_doc())
+                        .append(body.to_doc(depth - 1))
                         .nest(2),
                 )
                 .append(RcDoc::line_())
@@ -291,9 +294,9 @@ where
                     RcDoc::line()
                         .append(
                             function
-                                .to_doc()
+                                .to_doc(depth - 1)
                                 .append(RcDoc::line())
-                                .append(argument.to_doc())
+                                .append(argument.to_doc(depth - 1))
                                 .group(),
                         )
                         .nest(2),
@@ -304,7 +307,7 @@ where
                 .append(
                     RcDoc::text("con")
                         .append(RcDoc::line())
-                        .append(value.to_doc())
+                        .append(value.to_doc(depth - 1))
                         .nest(2),
                 )
                 .append(RcDoc::line_())
@@ -313,7 +316,7 @@ where
                 .append(
                     RcDoc::text("force")
                         .append(RcDoc::line())
-                        .append(then.to_doc())
+                        .append(then.to_doc(depth - 1))
                         .nest(2),
                 )
                 .append(RcDoc::line_())
@@ -341,7 +344,7 @@ where
                 )
                 .append(RcDoc::line_())
                 .append(RcDoc::intersperse(
-                    fields.iter().map(|f| f.to_doc()),
+                    fields.iter().map(|f| f.to_doc(depth - 1)),
                     RcDoc::line_(),
                 ))
                 .append(RcDoc::text(")")),
@@ -351,12 +354,12 @@ where
                 .append(
                     RcDoc::text("case")
                         .append(RcDoc::line())
-                        .append(constr.to_doc())
+                        .append(constr.to_doc(depth - 1))
                         .nest(2),
                 )
                 .append(RcDoc::line_())
                 .append(RcDoc::intersperse(
-                    branches.iter().map(|f| f.to_doc()),
+                    branches.iter().map(|f| f.to_doc(depth - 1)),
                     RcDoc::line_(),
                 ))
                 .append(RcDoc::text(")")),
