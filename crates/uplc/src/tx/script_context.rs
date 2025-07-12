@@ -6,7 +6,7 @@ use pallas_codec::utils::{
     Bytes, KeyValuePairs, NonEmptyKeyValuePairs, NonEmptySet, Nullable, PositiveCoin,
 };
 use pallas_crypto::hash::Hash;
-use pallas_primitives::{
+pub use pallas_primitives::{
     alonzo,
     conway::{
         AddrKeyhash, Certificate, Coin, DatumHash, DatumOption, GovAction, GovActionId, Mint,
