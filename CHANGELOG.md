@@ -1,6 +1,42 @@
 # Changelog
 
-## v1.1.16 - unreleased
+## v1.1.17 - UNRELEASED
+
+### Added
+
+- **aiken-lang**: New prelude function to conveniently upcast any serialisable type into `Data` in places where the compiler cannot do it implicitly.
+
+  ```aiken
+  pub fn as_data(data: Data) -> Data
+  ```
+
+- **aiken**: New `--property-coverage` flag to the `check` command, to switch the coverage denominator between the number of iterations and the total number of labels. @KtorZ
+
+  ```
+  -P, --property-coverage <COVERAGE_MODE>
+          Display options for the coverage.
+            - relative-to-labels:
+                Ratio of each label over the total number of labels.
+                Better when labels are mutually-exclusive and present in each test.
+
+            - relative-to-tests:
+                Ratio of each label over the total number of tests/iterations.
+                Better when labels are occasional and non-exclusive per test.
+
+          [default: relative-to-labels]
+- **aiken**: New `--script-override` flag added to the `tx simulate` command, to override script hashes with another script without modifying the transaction CBOR. @yHSJ
+
+  ```
+  --script-override [<SCRIPT_OVERRIDES>...]  The "from" hash which is being replaced and the hash "to" hash which is being overriden in the form "FROM:TO"
+  ```
+
+### Fixed
+
+- **aiken-lang**: Correctly infer Fuzzer & Sampler via type annotations when referring to foreign types. @KtorZ
+- **aiken-lang**: Allow type reification to pierce through Data aliases (e.g. Redeemer) holding lists, tuples or pairs, instead of crashing the compiler. @KtorZ
+- **aiken-lang**: Allow `Pair` to be used inline in Fuzzer's eDSL. @KtorZ
+
+## v1.1.16 - 2025-04-14
 
 ### Added
 

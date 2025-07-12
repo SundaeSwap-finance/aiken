@@ -1,3 +1,5 @@
+#![allow(clippy::doc_overindented_list_items)]
+
 use super::build::{trace_filter_parser, trace_level_parser};
 use aiken_lang::{
     ast::{TraceLevel, Tracing},
@@ -12,6 +14,7 @@ use std::{
 };
 
 #[derive(clap::Args)]
+#[clap(disable_version_flag(true))]
 /// Benchmark an Aiken project
 pub struct Args {
     /// Path to project

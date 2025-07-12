@@ -1,9 +1,12 @@
+#![allow(clippy::doc_overindented_list_items)]
+
 use aiken_lang::ast::{TraceLevel, Tracing};
 use aiken_project::watch::{self, watch_project, with_project};
 use clap::builder::{MapValueParser, PossibleValuesParser, TypedValueParser};
 use std::{path::PathBuf, process};
 
 #[derive(clap::Args)]
+#[clap(disable_version_flag(true))]
 /// Build an Aiken project
 pub struct Args {
     /// Path to project

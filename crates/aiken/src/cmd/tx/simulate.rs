@@ -1,20 +1,27 @@
+use aiken_project::{
+    error::{Error, ScriptOverrideArugmentError},
+    watch::with_project,
+};
 use miette::IntoDiagnostic;
+use ordinal::Ordinal;
 use owo_colors::{OwoColorize, Stream::Stderr};
+use pallas_addresses::ScriptHash;
 use pallas_primitives::{
     Fragment,
     conway::{Redeemer, TransactionInput, TransactionOutput},
 };
 use pallas_traverse::{Era, MultiEraTx};
-use std::{fmt, fs, path::PathBuf, process};
+use std::{collections::HashMap, fmt, fs, path::PathBuf, process};
 use uplc::{
     machine::cost_model::ExBudget,
     tx::{
         self, redeemer_tag_to_string,
-        script_context::{ResolvedInput, SlotConfig},
+        script_context::{PlutusScript, ResolvedInput, SlotConfig},
     },
 };
 
 #[derive(clap::Args)]
+#[clap(disable_version_flag(true))]
 /// Simulate a transaction by evaluating it's script
 pub struct Args {
     /// A file containing cbor hex for a transaction
@@ -44,6 +51,15 @@ pub struct Args {
     /// Slot number at the start of the shelley hardfork
     #[clap(long, default_value_t = 4492800, value_name = "SLOT")]
     zero_slot: u64,
+
+    /// An Aiken blueprint JSON file containing the overriding scripts, if applicable
+    #[clap(value_name = "FILEPATH")]
+    blueprint: Option<PathBuf>,
+
+    /// A mapping (colon-separated) from a script hash (in the transaction) to override by another script found in the blueprint.
+    /// For example:`d27cee75:197c9353`
+    #[clap(long("script-override"), value_name = "FROM:TO", num_args(0..), verbatim_doc_comment)]
+    script_overrides: Vec<String>,
 }
 
 pub fn exec(
@@ -55,6 +71,8 @@ pub fn exec(
         slot_length,
         zero_time,
         zero_slot,
+        blueprint,
+        script_overrides,
     }: Args,
 ) -> miette::Result<()> {
     eprintln!(
@@ -83,6 +101,78 @@ pub fn exec(
     };
 
     let tx = MultiEraTx::decode_for_era(Era::Conway, &tx_bytes).into_diagnostic()?;
+
+    let mut overrides: HashMap<ScriptHash, PlutusScript> = HashMap::new();
+
+    if !script_overrides.is_empty() {
+        with_project(None, false, true, false, |p| {
+            eprintln!(
+                "{} scripts",
+                "      Overriding"
+                    .if_supports_color(Stderr, |s| s.purple())
+                    .if_supports_color(Stderr, |s| s.bold()),
+            );
+
+            let blueprint_path = p.blueprint_path(blueprint.as_deref());
+            let blueprint = p.blueprint(&blueprint_path)?;
+            let blueprint_validators: HashMap<ScriptHash, PlutusScript> = blueprint.into();
+
+            script_overrides
+                .iter()
+                .enumerate()
+                .try_for_each::<_, Result<_, aiken_project::error::Error>>(
+                    |(i, script_override)| {
+                        let mut parts = script_override.split(":");
+
+                        let from = parts
+                            .next()
+                            .ok_or(Error::ScriptOverrideArgumentParseError {
+                                index: Ordinal(i).suffix().to_string(),
+                                error: ScriptOverrideArugmentError::InvalidFormat,
+                            })?;
+
+                        let to = parts
+                            .next()
+                            .ok_or(Error::ScriptOverrideArgumentParseError {
+                                index: Ordinal(i).suffix().to_string(),
+                                error: ScriptOverrideArugmentError::InvalidFormat,
+                            })?;
+
+                        let from_hash = ScriptHash::from(
+                            hex::decode(from)
+                                .map_err(|e| Error::ScriptOverrideArgumentParseError {
+                                    index: Ordinal(i).suffix().to_string(),
+                                    error: ScriptOverrideArugmentError::InvalidHash(e),
+                                })?
+                                .as_slice(),
+                        );
+
+                        let to_hash = ScriptHash::from(
+                            hex::decode(to)
+                                .map_err(|e| Error::ScriptOverrideArgumentParseError {
+                                    index: Ordinal(i).suffix().to_string(),
+                                    error: ScriptOverrideArugmentError::InvalidHash(e),
+                                })?
+                                .as_slice(),
+                        );
+
+                        overrides.insert(
+                            from_hash,
+                            blueprint_validators
+                                .get(&to_hash)
+                                .ok_or(Error::ScriptOverrideNotFound {
+                                    script_hash: to_hash,
+                                })?
+                                .clone(),
+                        );
+
+                        Ok(())
+                    },
+                )?;
+
+            Ok(())
+        })?;
+    }
 
     eprintln!(
         "{} {}",
@@ -122,12 +212,13 @@ pub fn exec(
             )
         };
 
-        let result = tx::eval_phase_two(
+        let result = tx::eval_phase_two_with_override(
             tx_conway,
             &resolved_inputs,
             None,
             None,
             &slot_config,
+            overrides,
             true,
             with_redeemer,
         );

@@ -28,7 +28,7 @@ use crate::{
     config::ProjectConfig,
     error::{Error, Warning},
     module::{CheckedModule, CheckedModules, ParsedModule, ParsedModules},
-    telemetry::Event,
+    telemetry::{CoverageMode, Event},
 };
 use aiken_lang::{
     IdGenerator,
@@ -277,6 +277,7 @@ where
         exact_match: bool,
         seed: u32,
         property_max_success: usize,
+        coverage_mode: CoverageMode,
         tracing: Tracing,
         env: Option<String>,
     ) -> Result<(), Vec<Error>> {
@@ -292,6 +293,7 @@ where
                     exact_match,
                     seed,
                     property_max_success,
+                    coverage_mode,
                 }
             },
             blueprint_path: self.blueprint_path(None),
@@ -442,6 +444,7 @@ where
                 exact_match,
                 seed,
                 property_max_success,
+                coverage_mode,
             } => {
                 let tests =
                     self.collect_tests(verbose, match_tests, exact_match, options.tracing)?;
@@ -474,8 +477,11 @@ where
                     })
                     .collect();
 
-                self.event_listener
-                    .handle_event(Event::FinishedTests { seed, tests });
+                self.event_listener.handle_event(Event::FinishedTests {
+                    seed,
+                    coverage_mode,
+                    tests,
+                });
 
                 if !errors.is_empty() {
                     Err(errors)
@@ -554,10 +560,7 @@ where
             Some(StakePayload::Script(script)) => ShelleyDelegationPart::Script(script),
         };
 
-        // Read blueprint
-        let blueprint = File::open(blueprint_path)
-            .map_err(|_| blueprint::error::Error::InvalidOrMissingFile)?;
-        let blueprint: Blueprint = serde_json::from_reader(BufReader::new(blueprint))?;
+        let blueprint = self.blueprint(blueprint_path)?;
 
         // Calculate the address
         let when_too_many =
@@ -597,10 +600,7 @@ where
         validator_name: Option<&str>,
         blueprint_path: &Path,
     ) -> Result<PolicyId, Error> {
-        // Read blueprint
-        let blueprint = File::open(blueprint_path)
-            .map_err(|_| blueprint::error::Error::InvalidOrMissingFile)?;
-        let blueprint: Blueprint = serde_json::from_reader(BufReader::new(blueprint))?;
+        let blueprint = self.blueprint(blueprint_path)?;
 
         // Error handlers for ambiguous / missing validators
         let when_too_many =
@@ -617,7 +617,7 @@ where
                 if n > 0 {
                     Err(blueprint::error::Error::ParameterizedValidator { n }.into())
                 } else {
-                    Ok(validator.program.compiled_code_and_hash().1)
+                    Ok(validator.program.compiled_code_and_hash().0)
                 }
             },
         )
@@ -708,10 +708,7 @@ where
         blueprint_path: &Path,
         param: &PlutusData,
     ) -> Result<Blueprint, Error> {
-        // Read blueprint
-        let blueprint = File::open(blueprint_path)
-            .map_err(|_| blueprint::error::Error::InvalidOrMissingFile)?;
-        let mut blueprint: Blueprint = serde_json::from_reader(BufReader::new(blueprint))?;
+        let mut blueprint = self.blueprint(blueprint_path)?;
 
         // Apply parameters
         let when_too_many =
@@ -748,6 +745,12 @@ where
             .collect();
 
         Ok(blueprint)
+    }
+
+    pub fn blueprint(&self, path: &Path) -> Result<Blueprint, Error> {
+        let blueprint =
+            File::open(path).map_err(|_| blueprint::error::Error::InvalidOrMissingFile)?;
+        Ok(serde_json::from_reader(BufReader::new(blueprint))?)
     }
 
     fn with_dependencies(&mut self, parsed_packages: &mut ParsedModules) -> Result<(), Vec<Error>> {

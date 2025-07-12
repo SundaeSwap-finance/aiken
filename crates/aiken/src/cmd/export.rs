@@ -1,9 +1,12 @@
+#![allow(clippy::doc_overindented_list_items)]
+
 use super::build::{trace_filter_parser, trace_level_parser};
 use aiken_lang::ast::{TraceLevel, Tracing};
 use aiken_project::{options::Options, watch::with_project};
 use std::path::PathBuf;
 
 #[derive(clap::Args)]
+#[clap(disable_version_flag(true))]
 /// Export a function as a standalone UPLC program. Arguments to the function can be applied using
 /// `aiken apply`.
 pub struct Args {

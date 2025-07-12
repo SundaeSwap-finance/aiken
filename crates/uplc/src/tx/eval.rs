@@ -9,7 +9,7 @@ use crate::{
     machine::{cost_model::ExBudget, eval_result::EvalResult},
     tx::{
         phase_one::redeemer_tag_to_string,
-        script_context::{DataLookupTable, ScriptVersion, TxInfoV1, TxInfoV2, TxInfoV3},
+        script_context::{DataLookupTable, PlutusScript, TxInfoV1, TxInfoV2, TxInfoV3},
     },
 };
 use pallas_codec::utils::Bytes;
@@ -55,9 +55,7 @@ pub fn redeemer_to_program(
     };
 
     match find_script(redeemer, tx, utxos, lookup_table)? {
-        (ScriptVersion::Native(_), _) => Err(Error::NativeScriptPhaseTwo),
-
-        (ScriptVersion::V1(script), datum) => do_build_program(
+        (PlutusScript::V1(script), datum) => do_build_program(
             datum,
             redeemer,
             Language::PlutusV1,
@@ -65,7 +63,7 @@ pub fn redeemer_to_program(
             program(script.0)?,
         ),
 
-        (ScriptVersion::V2(script), datum) => do_build_program(
+        (PlutusScript::V2(script), datum) => do_build_program(
             datum,
             redeemer,
             Language::PlutusV2,
@@ -73,7 +71,7 @@ pub fn redeemer_to_program(
             program(script.0)?,
         ),
 
-        (ScriptVersion::V3(script), datum) => do_build_program(
+        (PlutusScript::V3(script), datum) => do_build_program(
             datum,
             redeemer,
             Language::PlutusV3,
@@ -154,9 +152,7 @@ pub fn eval_redeemer(
     };
 
     match find_script(redeemer, tx, utxos, lookup_table)? {
-        (ScriptVersion::Native(_), _) => Err(Error::NativeScriptPhaseTwo),
-
-        (ScriptVersion::V1(script), datum) => do_eval_redeemer(
+        (PlutusScript::V1(script), datum) => do_eval_redeemer(
             cost_mdls_opt
                 .map(|cost_mdls| {
                     cost_mdls
@@ -173,7 +169,7 @@ pub fn eval_redeemer(
             program(script.0)?,
         ),
 
-        (ScriptVersion::V2(script), datum) => do_eval_redeemer(
+        (PlutusScript::V2(script), datum) => do_eval_redeemer(
             cost_mdls_opt
                 .map(|cost_mdls| {
                     cost_mdls
@@ -190,7 +186,7 @@ pub fn eval_redeemer(
             program(script.0)?,
         ),
 
-        (ScriptVersion::V3(script), datum) => do_eval_redeemer(
+        (PlutusScript::V3(script), datum) => do_eval_redeemer(
             cost_mdls_opt
                 .map(|cost_mdls| {
                     cost_mdls
