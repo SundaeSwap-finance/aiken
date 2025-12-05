@@ -15,8 +15,9 @@ use num_bigint::BigInt;
 use num_integer::Integer;
 use num_traits::{FromPrimitive, Signed, Zero};
 use once_cell::sync::Lazy;
+use pallas_codec::minicbor;
 use pallas_primitives::conway::{Language, PlutusData};
-use std::{mem::size_of, ops::Deref, rc::Rc};
+use std::{convert::Infallible, mem::size_of, ops::Deref, rc::Rc};
 
 static SCALAR_PERIOD: Lazy<BigInt> = Lazy::new(|| {
     BigInt::from_bytes_be(
@@ -390,6 +391,7 @@ impl DefaultFunction {
         args: &[Value],
         traces: &mut Vec<Trace>,
     ) -> Result<Value, Error> {
+        eprintln!("{:?}", self);
         match self {
             DefaultFunction::AddInteger => {
                 let arg1 = args[0].unwrap_integer()?;
@@ -424,6 +426,8 @@ impl DefaultFunction {
             DefaultFunction::DivideInteger => {
                 let arg1 = args[0].unwrap_integer()?;
                 let arg2 = args[1].unwrap_integer()?;
+
+                eprintln!("DivideInteger {} {}", arg1, arg2);
 
                 if *arg2 != 0.into() {
                     let (result, _) = arg1.div_mod_floor(arg2);
@@ -489,6 +493,8 @@ impl DefaultFunction {
                 let arg1 = args[0].unwrap_integer()?;
                 let arg2 = args[1].unwrap_integer()?;
 
+                eprintln!("LessThanInteger {} {}", arg1, arg2);
+
                 let value = Value::bool(arg1 < arg2);
 
                 Ok(value)
@@ -497,13 +503,22 @@ impl DefaultFunction {
                 let arg1 = args[0].unwrap_integer()?;
                 let arg2 = args[1].unwrap_integer()?;
 
-                let value = Value::bool(arg1 <= arg2);
+                let result = arg1 <= arg2;
+                let value = Value::bool(result);
+
+                eprintln!("LessThanEqualsInteger {} {} {}", arg1, arg2, result);
 
                 Ok(value)
             }
             DefaultFunction::AppendByteString => {
                 let arg1 = args[0].unwrap_byte_string()?;
                 let arg2 = args[1].unwrap_byte_string()?;
+
+                eprintln!(
+                    "AppendByteString {} {}",
+                    hex::encode(arg1),
+                    hex::encode(arg2)
+                );
 
                 let result = arg1.iter().copied().chain(arg2.iter().copied()).collect();
 
@@ -570,6 +585,8 @@ impl DefaultFunction {
             DefaultFunction::IndexByteString => {
                 let arg1 = args[0].unwrap_byte_string()?;
                 let arg2 = args[1].unwrap_integer()?;
+
+                eprintln!("IndexByteString {} {}", hex::encode(arg1), arg2);
 
                 let index: i128 = arg2.try_into().unwrap();
 
@@ -661,6 +678,8 @@ impl DefaultFunction {
                 use cryptoxide::{blake2b::Blake2b, digest::Digest};
 
                 let arg1 = args[0].unwrap_byte_string()?;
+
+                eprintln!("Blake2b_256 {}", hex::encode(arg1));
 
                 let mut digest = [0u8; 32];
                 let mut context = Blake2b::new(32);
@@ -762,6 +781,8 @@ impl DefaultFunction {
             }
             DefaultFunction::IfThenElse => {
                 let condition = args[0].unwrap_bool()?;
+
+                eprintln!("IfThenElse {}", condition);
 
                 if *condition {
                     Ok(args[1].clone())
@@ -928,6 +949,15 @@ impl DefaultFunction {
                     })
                     .collect();
 
+                eprintln!(
+                    "ListData [{:?}]",
+                    data_list
+                        .iter()
+                        .map(|data| hex::encode(to_cbor(data)))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+
                 let value = Value::data(Data::list(data_list));
 
                 Ok(value)
@@ -1020,6 +1050,14 @@ impl DefaultFunction {
                         ));
                     };
 
+                    eprintln!(
+                        "UnListData [{}]",
+                        l.iter()
+                            .map(|data| hex::encode(to_cbor(data)))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+
                     let value = Value::list(
                         Type::Data,
                         l.deref()
@@ -1035,6 +1073,13 @@ impl DefaultFunction {
             DefaultFunction::UnIData => match &args[0] {
                 v @ Value::Con(inner) => {
                     let Constant::Data(PlutusData::BigInt(b)) = inner.as_ref() else {
+                        match inner.as_ref() {
+                            Constant::Data(PlutusData::BoundedBytes(b)) => {
+                                let x: Vec<_> = b.clone().into();
+                                eprintln!("UnIData {}", hex::encode(x))
+                            }
+                            _ => eprintln!("UnIData {:?}", inner),
+                        }
                         return Err(Error::DeserialisationError(
                             "UnIData".to_string(),
                             v.clone(),
@@ -1768,6 +1813,14 @@ impl DefaultFunction {
             } // DefaultFunction::ExpModInteger => todo!(),
         }
     }
+}
+
+pub fn to_cbor<T: minicbor::Encode<()>>(value: &T) -> Vec<u8> {
+    let mut buffer = Vec::new();
+    let result: Result<(), minicbor::encode::Error<Infallible>> =
+        minicbor::encode(value, &mut buffer);
+    result.unwrap(); // Infallible
+    buffer
 }
 
 pub trait Compressable {

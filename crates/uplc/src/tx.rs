@@ -10,7 +10,7 @@ use pallas_addresses::ScriptHash;
 use pallas_primitives::{
     Fragment,
     conway::{
-        CostModels, ExUnits, Language, MintedTx, Redeemer, Redeemers, RedeemersKey,
+        CostModels, ExUnits, Language, MintedTx, Redeemer, RedeemerTag, Redeemers, RedeemersKey,
         TransactionInput, TransactionOutput,
     },
 };
@@ -56,6 +56,7 @@ pub fn tx_to_programs(
             };
 
             for redeemer in redeemers {
+                eprintln!("redeemer: {:?}", redeemer);
                 let (program, language) =
                     eval::redeemer_to_program(tx, utxos, slot_config, &redeemer, &lookup_table)?;
 

@@ -545,7 +545,15 @@ impl ToPlutusData for WithPartialCertificates<'_, Certificate> {
                 wrap_with_constr(0, stake_credential.to_plutus_data())
             }
 
+            Certificate::Reg(stake_credential, _) => {
+                wrap_with_constr(0, stake_credential.to_plutus_data())
+            }
+
             Certificate::StakeDeregistration(stake_credential) => {
+                wrap_with_constr(1, stake_credential.to_plutus_data())
+            }
+
+            Certificate::UnReg(stake_credential, _) => {
                 wrap_with_constr(1, stake_credential.to_plutus_data())
             }
 

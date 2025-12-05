@@ -1,3 +1,5 @@
+use std::convert::Infallible;
+
 use super::{
     Error,
     script_context::{ResolvedInput, ScriptContext, SlotConfig, TxInfo, find_script},
@@ -12,7 +14,7 @@ use crate::{
         script_context::{DataLookupTable, PlutusScript, TxInfoV1, TxInfoV2, TxInfoV3},
     },
 };
-use pallas_codec::utils::Bytes;
+use pallas_codec::{minicbor, utils::Bytes};
 use pallas_primitives::conway::{CostModel, CostModels, ExUnits, Language, MintedTx, Redeemer};
 
 pub fn redeemer_to_program(
@@ -29,9 +31,22 @@ pub fn redeemer_to_program(
         tx_info: TxInfo,
         program: Program<NamedDeBruijn>,
     ) -> Result<(Program<NamedDeBruijn>, Language), Error> {
+        pub fn to_cbor<T: minicbor::Encode<()>>(value: &T) -> Vec<u8> {
+            let mut buffer = Vec::new();
+            let result: Result<(), minicbor::encode::Error<Infallible>> =
+                minicbor::encode(value, &mut buffer);
+            result.unwrap(); // Infallible
+            buffer
+        }
+
         let script_context = tx_info
             .into_script_context(redeemer, datum.as_ref())
             .expect("couldn't create script context from transaction?");
+
+        eprintln!(
+            "Script Context: {}",
+            hex::encode(to_cbor(&script_context.to_plutus_data()))
+        );
 
         let program = match script_context {
             ScriptContext::V1V2 { .. } => if let Some(datum) = datum {
